@@ -1,0 +1,464 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id              String   @id @default(cuid())
+  name            String
+  email           String?  @unique
+  password        String?
+  role            String
+  department      String?
+  isActive        Boolean  @default(true)
+  dutyStatus      String   @default("INACTIVE")
+  lastActivatedAt DateTime?
+  shiftType       String?
+  employeeId      String?  @unique
+  designation     String?
+  phone           String?
+  dateJoined      DateTime? @default(now())
+  employmentStatus String?  @default("ACTIVE")
+  notes           String?
+  requiresPasswordChange Boolean @default(false)
+  pin             String?
+  addressLine1    String?
+  addressLine2    String?
+  city            String?
+  state           String?
+  postalCode      String?
+  country         String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  doctorAssignments DoctorAssignment[]
+  consultations     Consultation[]
+  prescriptions     Prescription[]
+  doctorQueues      DoctorQueue[]
+  medicalHistories  MedicalHistory[]
+  activityLogs      ActivityLog[]
+  tasks             Task[]
+  labRequests       LabRequest[]
+  referralsMade     Referral[] @relation("ReferringDoctor")
+  referralsReceived Referral[] @relation("TargetDoctor")
+}
+
+model Patient {
+  id                    String   @id @default(cuid())
+  name                  String
+  age                   Int
+  dateOfBirth           DateTime?
+  gender                String
+  phone                 String
+  email                 String?
+  address               String?
+  bloodGroup            String?
+  medicalHistory        String? 
+  chronicConditions     String?
+  allergies             String?
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  bloodPressure         String?
+  weight                String?
+  temperature           String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  appointments   Appointment[]
+  tokens         Token[]
+  consultations  Consultation[]
+  doctorQueues   DoctorQueue[]
+  medicalHistories MedicalHistory[]
+  visitRecords   VisitRecord[]
+  prescriptions  Prescription[]
+  bills          Bill[]
+  labRequests    LabRequest[]
+  referrals      Referral[]
+}
+
+model Appointment {
+  id        String   @id @default(cuid())
+  patientId String
+  doctorId  String
+  date      DateTime
+  time      String?
+  status    String   @default("WAITING") 
+  createdAt DateTime @default(now())
+
+  patient Patient @relation(fields: [patientId], references: [id])
+  doctorQueues DoctorQueue[]
+
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model Token {
+  id          String   @id @default(cuid())
+  tokenNumber String   @unique
+  patientId   String
+  doctorId    String
+  status      String   @default("WAITING") 
+  priority    String   @default("MEDIUM")
+  createdAt   DateTime @default(now())
+
+  patient     Patient      @relation(fields: [patientId], references: [id])
+  visitRecord VisitRecord?
+  doctorQueue DoctorQueue?
+
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model DoctorQueue {
+  id            String   @id @default(cuid())
+  patientId     String
+  doctorId      String
+  appointmentId String
+  tokenId       String   @unique
+  status        String   @default("WAITING") 
+  assignedAt    DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  patient     Patient      @relation(fields: [patientId], references: [id])
+  doctor      User         @relation(fields: [doctorId], references: [id])
+  appointment Appointment  @relation(fields: [appointmentId], references: [id])
+  token       Token        @relation(fields: [tokenId], references: [id])
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([appointmentId])
+}
+
+model MedicalHistory {
+  id             String   @id @default(cuid())
+  patientId      String
+  doctorId       String
+  consultationId String   @unique
+  visitDate      DateTime @default(now())
+  notes          String
+  diagnosis      String?
+  medicines      String? // Simplified snapshot or link
+  chronicConditions String?
+  
+  patient Patient @relation(fields: [patientId], references: [id])
+  doctor  User    @relation(fields: [doctorId], references: [id])
+  consultation Consultation @relation(fields: [consultationId], references: [id])
+
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model DoctorAssignment {
+  id        String   @id @default(cuid())
+  doctorId  String
+  patientId String
+  status    String   @default("ASSIGNED")
+  createdAt DateTime @default(now())
+
+  doctor User @relation(fields: [doctorId], references: [id])
+
+  @@index([doctorId])
+  @@index([patientId])
+}
+
+model VisitRecord {
+  id             String   @id @default(cuid())
+  patientId      String
+  doctorId       String
+  tokenId        String   @unique
+  createdAt      DateTime @default(now())
+
+  patient        Patient       @relation(fields: [patientId], references: [id])
+  token          Token         @relation(fields: [tokenId], references: [id])
+  consultation   Consultation?
+
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model Consultation {
+  id            String   @id @default(cuid())
+  visitRecordId String   @unique
+  patientId     String
+  doctorId      String
+  notes         String
+  diagnosis     String?
+  followUp      String?
+  startTime     DateTime?
+  endTime       DateTime @default(now())
+  type          String   @default("WITH_PRESCRIPTION") // WITH_PRESCRIPTION, ADVICE_ONLY
+  createdAt     DateTime @default(now())
+
+  symptoms       String?
+  chiefComplaint String?
+  vitals         String?
+  allergies      String?
+  observations   String?
+  chronicConditions String?
+  referral       String?
+
+  visitRecord VisitRecord @relation(fields: [visitRecordId], references: [id])
+  patient     Patient     @relation(fields: [patientId], references: [id])
+  doctor      User        @relation(fields: [doctorId], references: [id])
+  prescription Prescription?
+  medicalHistory MedicalHistory?
+  labRequests    LabRequest[]
+  referrals      Referral[]
+
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model Prescription {
+  id             String   @id @default(cuid())
+  consultationId String   @unique
+  patientId      String
+  doctorId       String
+  status         String   @default("PENDING") 
+  createdAt      DateTime @default(now())
+
+  consultation Consultation       @relation(fields: [consultationId], references: [id])
+  patient      Patient            @relation(fields: [patientId], references: [id])
+  doctor       User               @relation(fields: [doctorId], references: [id])
+  items        PrescriptionItem[]
+  pharmacyQueue PharmacyQueue?
+
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model PrescriptionItem {
+  id             String @id @default(cuid())
+  prescriptionId String
+  medicine       String
+  quantity       Int    @default(1)
+  dosage         String
+  frequency      String
+  duration       String
+  instructions   String?
+  inventoryItemId String?
+
+  prescription Prescription @relation(fields: [prescriptionId], references: [id])
+
+  @@index([prescriptionId])
+  @@index([inventoryItemId])
+}
+
+model PharmacyQueue {
+  id             String   @id @default(cuid())
+  prescriptionId String   @unique
+  status         String   @default("PENDING")
+  createdAt      DateTime @default(now())
+
+  prescription Prescription @relation(fields: [prescriptionId], references: [id])
+  dispensingLog PharmacyDispensingLog?
+}
+
+model PharmacyDispensingLog {
+  id              String   @id @default(cuid())
+  pharmacyQueueId String   @unique
+  dispensedAt     DateTime @default(now())
+  pharmacistId    String?
+
+  pharmacyQueue PharmacyQueue @relation(fields: [pharmacyQueueId], references: [id])
+  bill          Bill?
+}
+
+model Bill {
+  id             String   @id @default(cuid())
+  patientId      String
+  dispensingLogId String? @unique
+  tokenNumber    String
+  subtotal       Float
+  tax            Float
+  total          Float
+  status         String   @default("UNPAID") // UNPAID, PAID, CANCELLED
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  patient       Patient @relation(fields: [patientId], references: [id])
+  dispensingLog PharmacyDispensingLog? @relation(fields: [dispensingLogId], references: [id])
+  items         BillItem[]
+
+  @@index([patientId])
+}
+
+model BillItem {
+  id        String @id @default(cuid())
+  billId    String
+  name      String
+  quantity  Int
+  unitPrice Float
+  total     Float
+
+  bill Bill @relation(fields: [billId], references: [id])
+
+  @@index([billId])
+}
+
+model ActivityLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  details    String?
+  userName   String   @default("System")
+  timestamp  DateTime @default(now())
+
+  user       User?    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model InventoryItem {
+  id             String   @id @default(cuid())
+  itemCode       String   @unique
+  name           String
+  genericName    String?
+  brandName      String?
+  category       String?
+  type           String   // MEDICINE, CONSUMABLE, EQUIPMENT
+  dosage         String?
+  unit           String?
+  batchNumber    String?
+  expiryDate     DateTime?
+  supplierId     String?
+  purchasePrice  Float    @default(0.0)
+  sellingPrice   Float    @default(0.0)
+  stockQuantity  Int      @default(0)
+  minThreshold   Int      @default(10)
+  maxThreshold   Int      @default(100)
+  reorderLevel   Int      @default(20)
+  status         String   @default("ACTIVE") // ACTIVE, INACTIVE
+  shelfLocation  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  supplier       Supplier?            @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  transactions   InventoryTransaction[]
+  reorderRequests ReorderRequest[]
+}
+
+model Supplier {
+  id            String   @id @default(cuid())
+  name          String
+  contactPerson String?
+  phone         String?
+  email         String?
+  address       String?
+  status        String   @default("ACTIVE") // ACTIVE, INACTIVE
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  items         InventoryItem[]
+}
+
+model ReorderRequest {
+  id                String   @id @default(cuid())
+  inventoryItemId   String
+  quantityRequested Int
+  requestedBy       String?
+  status            String   @default("PENDING") // PENDING, APPROVED, COMPLETED, REJECTED
+  notes             String?
+  expectedDelivery  DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  inventoryItem     InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+
+  @@index([inventoryItemId])
+}
+
+model InventoryTransaction {
+  id             String   @id @default(cuid())
+  inventoryItemId String
+  type           String   // STOCK_IN, DISPENSED, ADJUSTMENT, EXPIRED, MANUAL
+  quantity       Int
+  performedBy    String?
+  referenceId    String?
+  timestamp      DateTime @default(now())
+
+  inventoryItem  InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+
+  @@index([inventoryItemId])
+}
+
+model LabRequest {
+  id             String   @id @default(cuid())
+  consultationId String
+  patientId      String
+  doctorId       String
+  testName       String
+  status         String   @default("PENDING") // PENDING, COMPLETED, CANCELLED
+  results        String?
+  createdAt      DateTime @default(now())
+
+  consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  patient        Patient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor         User         @relation(fields: [doctorId], references: [id])
+
+  @@index([consultationId])
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model Referral {
+  id             String   @id @default(cuid())
+  consultationId String
+  patientId      String
+  referringDocId String
+  targetDocId    String
+  reason         String
+  status         String   @default("OPEN") // OPEN, COMPLETED
+  createdAt      DateTime @default(now())
+
+  consultation   Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  patient        Patient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  referringDoc   User         @relation("ReferringDoctor", fields: [referringDocId], references: [id])
+  targetDoc      User         @relation("TargetDoctor", fields: [targetDocId], references: [id])
+
+  @@index([consultationId])
+  @@index([patientId])
+  @@index([referringDocId])
+  @@index([targetDocId])
+}
+
+model Task {
+  id           String    @id @default(cuid())
+  doctorId     String
+  title        String
+  description  String?
+  priority     String?
+  reminderDate String?
+  isCompleted  Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+
+  doctor       User      @relation(fields: [doctorId], references: [id])
+
+  @@index([doctorId])
+}
+
+model Department {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+}
+
+model PasswordResetRequest {
+  id          String   @id @default(cuid())
+  userId      String
+  employeeId  String
+  requestTime DateTime @default(now())
+  status      String   @default("PENDING") // PENDING, RESOLVED, REJECTED
+}
+
+model DutySetting {
+  id              String   @id @default("singleton")
+  morningShiftEnd String   @default("01:00 PM")
+  eveningShiftEnd String   @default("08:00 PM")
+  timezone        String   @default("Asia/Kolkata")
+  updatedAt       DateTime @updatedAt
+}
+
