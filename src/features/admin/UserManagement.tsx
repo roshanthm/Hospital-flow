@@ -323,12 +323,6 @@ export default function UserManagement() {
     fetchUsers();
     fetchDepartments();
     fetchTokens();
-    const interval = setInterval(() => {
-      fetchUsers();
-      fetchDepartments();
-      fetchTokens();
-    }, 5000);
-    return () => clearInterval(interval);
   }, [fetchUsers, fetchDepartments, fetchTokens]);
 
   // Handle direct tab switches e.g. from the dashboard or notifications
