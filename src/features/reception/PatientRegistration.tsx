@@ -98,14 +98,6 @@ export default function PatientRegistration() {
     fetchPatients();
     fetchUsers();
     fetchTokens();
-
-    const intervalId = setInterval(() => {
-      fetchPatients();
-      fetchUsers();
-      fetchTokens();
-    }, 5000);
-
-    return () => clearInterval(intervalId);
   }, [fetchPatients, fetchUsers, fetchTokens]);
 
   const getDeptDoctorsInRegistration = (deptKey: string) => {
