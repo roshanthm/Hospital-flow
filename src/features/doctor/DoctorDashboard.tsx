@@ -5,13 +5,16 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
 export default function DoctorDashboard() {
-  const { currentUser, logout, updateDutyStatus, fetchMe } = useStore();
+  const currentUser = useStore(state => state.currentUser);
+  const logout = useStore(state => state.logout);
+  const updateDutyStatus = useStore(state => state.updateDutyStatus);
+  const fetchMe = useStore(state => state.fetchMe);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   React.useEffect(() => {
     fetchMe();
-  }, [fetchMe]);
+  }, []);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<any>(null);
