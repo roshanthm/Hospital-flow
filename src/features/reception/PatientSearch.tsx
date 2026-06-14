@@ -73,6 +73,22 @@ export default function PatientSearch() {
   const [searchResults, setSearchResults] = useState<any>({ patients: [], tokens: [], consultations: [] });
   const [searchTimeout, setSearchTimeout] = useState<any>(null);
 
+  const handleManualRefresh = async () => {
+    const toastId = toast.loading('Refreshing patient entries & tickets...');
+    try {
+      await Promise.all([
+        fetchPatients(),
+        fetchUsers(),
+        fetchTokens(),
+        fetchActivityLogs()
+      ]);
+      toast.success('Patient registry and ticket queues synchronized!', { id: toastId });
+    } catch (err: any) {
+      console.error(err);
+      toast.error('Failed to sync. Please check network connection.', { id: toastId });
+    }
+  };
+
   const handleSearchChange = (val: string) => {
     setHeaderSearchTerm(val);
     if (!val.trim()) {
@@ -146,15 +162,6 @@ export default function PatientSearch() {
     fetchUsers();
     fetchTokens();
     fetchActivityLogs();
-
-    const intervalId = setInterval(() => {
-      fetchPatients();
-      fetchUsers();
-      fetchTokens();
-      fetchActivityLogs();
-    }, 5000);
-
-    return () => clearInterval(intervalId);
   }, []);
 
   useEffect(() => {
@@ -668,13 +675,23 @@ export default function PatientSearch() {
               Reception Hub <span className="w-1 h-1 rounded-full bg-[#747782]"></span> {formattedDate}
             </p>
           </div>
-          <button 
-            onClick={() => handleOpenNewAppointment()}
-            className="bg-[#002d72] text-white px-6 py-3 rounded-xl flex items-center gap-2 font-semibold hover:opacity-90 transition-all shadow-sm active:scale-95"
-          >
-            <span className="material-symbols-outlined">add</span>
-            New Appointment
-          </button>
+          <div className="flex gap-3">
+            <button
+              onClick={handleManualRefresh}
+              className="bg-white text-slate-700 border border-[#c4c6d2] px-4 py-3 rounded-xl flex items-center gap-2 font-semibold hover:bg-slate-50 transition-all shadow-sm active:scale-95 cursor-pointer"
+              title="Refresh database"
+            >
+              <span className="material-symbols-outlined text-[20px]">refresh</span>
+              Refresh
+            </button>
+            <button 
+              onClick={() => handleOpenNewAppointment()}
+              className="bg-[#002d72] text-white px-6 py-3 rounded-xl flex items-center gap-2 font-semibold hover:opacity-90 transition-all shadow-sm active:scale-95 whitespace-nowrap"
+            >
+              <span className="material-symbols-outlined">add</span>
+              New Appointment
+            </button>
+          </div>
         </div>
 
         {/* Summary Bento Grid */}
