@@ -30,10 +30,20 @@ const formatLocalDate = (dateObj: Date): string => {
 };
 
 export default function AdminDashboard() {
-  const { 
-    users, patients, appointments, activityLogs, tokens, prescriptions, bills,
-    fetchUsers, fetchPatients, fetchTokens, fetchPharmacyQueue, fetchBills, fetchActivityLogs
-  } = useStore();
+  const users = useStore(state => state.users);
+  const patients = useStore(state => state.patients);
+  const appointments = useStore(state => state.appointments);
+  const activityLogs = useStore(state => state.activityLogs);
+  const tokens = useStore(state => state.tokens);
+  const prescriptions = useStore(state => state.prescriptions);
+  const bills = useStore(state => state.bills);
+
+  const fetchUsers = useStore(state => state.fetchUsers);
+  const fetchPatients = useStore(state => state.fetchPatients);
+  const fetchTokens = useStore(state => state.fetchTokens);
+  const fetchPharmacyQueue = useStore(state => state.fetchPharmacyQueue);
+  const fetchBills = useStore(state => state.fetchBills);
+  const fetchActivityLogs = useStore(state => state.fetchActivityLogs);
 
   const [consultations, setConsultations] = useState<any[]>([]);
   const [timeFilter, setTimeFilter] = useState<'30days' | '24h' | '7days'>('30days');
@@ -132,7 +142,7 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     fetchAttendance();
-  }, [fetchAttendance]);
+  }, [attendanceFilter, attStartInput, attEndInput]);
 
   useEffect(() => {
     fetchUsers();
