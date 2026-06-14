@@ -61,7 +61,18 @@ interface QueueToken {
 
 export default function TokenManagement() {
   const navigate = useNavigate();
-  const { logout, currentUser, patients, fetchPatients, tokens: storeTokens, fetchTokens, updateTokenStatus, updateTokenPriority, addAppointment, users, fetchUsers, addPatient } = useStore();
+  const logout = useStore(state => state.logout);
+  const currentUser = useStore(state => state.currentUser);
+  const patients = useStore(state => state.patients);
+  const fetchPatients = useStore(state => state.fetchPatients);
+  const storeTokens = useStore(state => state.tokens);
+  const fetchTokens = useStore(state => state.fetchTokens);
+  const updateTokenStatus = useStore(state => state.updateTokenStatus);
+  const updateTokenPriority = useStore(state => state.updateTokenPriority);
+  const addAppointment = useStore(state => state.addAppointment);
+  const users = useStore(state => state.users);
+  const fetchUsers = useStore(state => state.fetchUsers);
+  const addPatient = useStore(state => state.addPatient);
 
   useEffect(() => {
     fetchPatients();
@@ -75,7 +86,7 @@ export default function TokenManagement() {
     }, 5000);
 
     return () => clearInterval(intervalId);
-  }, [fetchPatients, fetchTokens, fetchUsers]);
+  }, []);
 
   // Support Closing via keys (Escape)
   useEffect(() => {
