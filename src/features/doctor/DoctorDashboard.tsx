@@ -11,10 +11,6 @@ export default function DoctorDashboard() {
 
   React.useEffect(() => {
     fetchMe();
-    const interval = setInterval(() => {
-      fetchMe();
-    }, 5000);
-    return () => clearInterval(interval);
   }, [fetchMe]);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -73,7 +69,7 @@ export default function DoctorDashboard() {
       if (!res.ok) throw new Error('Failed to fetch tokens');
       return res.json();
     },
-    refetchInterval: 3000
+    refetchInterval: 30000
   });
 
   const { data: tasks = [], isLoading: isLoadingTasks } = useQuery({
