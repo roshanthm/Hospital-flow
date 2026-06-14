@@ -21,10 +21,17 @@ import { UserRole } from '@/src/types';
 import { generateStaffCredentials } from '@/src/lib/utils';
 
 export default function UserManagement() {
-  const { 
-    users, addUser, updateUser, deleteUser, addActivityLog, fetchUsers, 
-    departments, fetchDepartments, addDepartment, tokens, fetchTokens 
-  } = useStore();
+  const users = useStore(state => state.users);
+  const addUser = useStore(state => state.addUser);
+  const updateUser = useStore(state => state.updateUser);
+  const deleteUser = useStore(state => state.deleteUser);
+  const addActivityLog = useStore(state => state.addActivityLog);
+  const fetchUsers = useStore(state => state.fetchUsers);
+  const departments = useStore(state => state.departments);
+  const fetchDepartments = useStore(state => state.fetchDepartments);
+  const addDepartment = useStore(state => state.addDepartment);
+  const tokens = useStore(state => state.tokens);
+  const fetchTokens = useStore(state => state.fetchTokens);
 
   const location = useLocation();
 
@@ -323,7 +330,7 @@ export default function UserManagement() {
     fetchUsers();
     fetchDepartments();
     fetchTokens();
-  }, [fetchUsers, fetchDepartments, fetchTokens]);
+  }, []);
 
   // Handle direct tab switches e.g. from the dashboard or notifications
   useEffect(() => {
