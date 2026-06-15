@@ -8,7 +8,8 @@ import { generateFullPatientHistoryPDF } from '../../lib/pdfUtils';
 export default function DoctorMedicalHistory() {
   const { patientId } = useParams();
   const navigate = useNavigate();
-  const { currentUser, logout } = useStore();
+  const currentUser = useStore(state => state.currentUser);
+  const logout = useStore(state => state.logout);
   const [activeTab, setActiveTab] = useState('All Events');
 
   const [searchQuery, setSearchQuery] = useState('');
