@@ -804,23 +804,25 @@ async function startServer() {
         orderBy: { requestTime: 'desc' }
       });
 
-      const requestsWithUser = await Promise.all(
-        requests.map(async (r) => {
-          const user = await prisma.user.findUnique({
-            where: { id: r.userId }
-          });
-          return {
-            id: r.id,
-            userId: r.userId,
-            employeeId: r.employeeId,
-            requestTime: r.requestTime,
-            status: r.status,
-            userName: user ? user.name : 'Unknown Employee',
-            userRole: user ? user.role : 'UNKNOWN',
-            userDepartment: user ? user.department : 'General'
-          };
-        })
-      );
+      const userIds = Array.from(new Set(requests.map(r => r.userId).filter(Boolean)));
+      const users = await prisma.user.findMany({
+        where: { id: { in: userIds } }
+      });
+      const userMap = new Map(users.map(u => [u.id, u]));
+
+      const requestsWithUser = requests.map((r) => {
+        const user = userMap.get(r.userId);
+        return {
+          id: r.id,
+          userId: r.userId,
+          employeeId: r.employeeId,
+          requestTime: r.requestTime,
+          status: r.status,
+          userName: user ? user.name : 'Unknown Employee',
+          userRole: user ? user.role : 'UNKNOWN',
+          userDepartment: user ? user.department : 'General'
+        };
+      });
 
       res.json(requestsWithUser);
     } catch (error: any) {
@@ -2820,65 +2822,50 @@ async function startServer() {
         orderBy: { name: 'asc' }
       });
 
-      const enhancedItems = await Promise.all(items.map(async (item) => {
-        const namePart = item.name;
+      const allActiveBatches = await prisma.inventoryItem.findMany({
+        where: {
+          status: 'ACTIVE',
+          stockQuantity: { gt: 0 }
+        }
+      });
 
-        // Perform Postgres aggregates for this medicine name
-        // Active, non-empty, non-expired batches only
-        const dbAggregates = await prisma.inventoryItem.aggregate({
-          _sum: {
-            stockQuantity: true
-          },
-          _count: {
-            id: true
-          },
-          where: {
-            name: { equals: namePart, mode: 'insensitive' },
-            status: 'ACTIVE',
-            stockQuantity: { gt: 0 },
-            OR: [
-              { expiryDate: null },
-              { expiryDate: { gte: new Date() } }
-            ]
+      const now = new Date();
+      const totalStockMap = new Map<string, number>();
+      const activeBatchCountMap = new Map<string, number>();
+      const nextExpiryDatesMap = new Map<string, Date>();
+      const hasExpiredMap = new Map<string, boolean>();
+
+      for (const batch of allActiveBatches) {
+        if (!batch.name) continue;
+        const key = batch.name.toLowerCase();
+
+        const isNotExpired = !batch.expiryDate || batch.expiryDate >= now;
+        const isExpired = batch.expiryDate && batch.expiryDate < now;
+
+        if (isNotExpired) {
+          totalStockMap.set(key, (totalStockMap.get(key) || 0) + batch.stockQuantity);
+          activeBatchCountMap.set(key, (activeBatchCountMap.get(key) || 0) + 1);
+        }
+
+        if (batch.expiryDate && batch.expiryDate >= now) {
+          const currentNext = nextExpiryDatesMap.get(key);
+          if (!currentNext || batch.expiryDate < currentNext) {
+            nextExpiryDatesMap.set(key, batch.expiryDate);
           }
-        });
+        }
 
-        // 1. Total Stock
-        const totalStock = dbAggregates._sum.stockQuantity || 0;
+        if (isExpired) {
+          hasExpiredMap.set(key, true);
+        }
+      }
 
-        // 2. Active Batch Count
-        const activeBatchCount = dbAggregates._count.id || 0;
-
-        // 3. Next Expiry Date (nearest non-expired expiry date from active, non-empty batches)
-        const nextExpiryBatch = await prisma.inventoryItem.findFirst({
-          where: {
-            name: { equals: namePart, mode: 'insensitive' },
-            status: 'ACTIVE',
-            stockQuantity: { gt: 0 },
-            expiryDate: { gte: new Date() }
-          },
-          orderBy: {
-            expiryDate: 'asc'
-          },
-          select: {
-            expiryDate: true
-          }
-        });
-        const nextExpiryDate = nextExpiryBatch?.expiryDate || null;
-
-        // 4. Low Stock Status (total stock of eligible batches is below or equal to minThreshold)
+      const enhancedItems = items.map((item) => {
+        const key = (item.name || '').toLowerCase();
+        const totalStock = totalStockMap.get(key) || 0;
+        const activeBatchCount = activeBatchCountMap.get(key) || 0;
+        const nextExpiryDate = nextExpiryDatesMap.get(key) || null;
         const isLowStock = totalStock <= (item.minThreshold || 10);
-
-        // 5. Expired Status (if any active batch exists that is expired and has stock)
-        const expiredBatch = await prisma.inventoryItem.findFirst({
-          where: {
-            name: { equals: namePart, mode: 'insensitive' },
-            status: 'ACTIVE',
-            stockQuantity: { gt: 0 },
-            expiryDate: { lt: new Date() }
-          }
-        });
-        const hasExpiredBatches = !!expiredBatch;
+        const hasExpiredBatches = hasExpiredMap.get(key) || false;
 
         return {
           ...item,
@@ -2888,7 +2875,7 @@ async function startServer() {
           isLowStock,
           hasExpiredBatches
         };
-      }));
+      });
 
       res.json(enhancedItems);
     } catch (error) {
