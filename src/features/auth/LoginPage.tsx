@@ -33,7 +33,8 @@ type LoginForm = z.infer<typeof loginSchema>;
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { login, addActivityLog } = useStore();
+  const login = useStore(state => state.login);
+  const addActivityLog = useStore(state => state.addActivityLog);
   const [showPassword, setShowPassword] = useState(false);
   
   // SECURE PASSWORD RECOVERY STRATEGY STATES
