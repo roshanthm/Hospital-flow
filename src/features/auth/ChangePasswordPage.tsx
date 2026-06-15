@@ -22,7 +22,9 @@ import {
 } from 'lucide-react';
 
 export default function ChangePasswordPage() {
-  const { currentUser, logout, addActivityLog } = useStore();
+  const currentUser = useStore(state => state.currentUser);
+  const logout = useStore(state => state.logout);
+  const addActivityLog = useStore(state => state.addActivityLog);
   const navigate = useNavigate();
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');

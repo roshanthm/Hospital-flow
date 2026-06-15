@@ -17,7 +17,10 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
 export default function RevenueReports() {
-  const { bills, fetchBills, departments, fetchDepartments } = useStore();
+  const bills = useStore(state => state.bills);
+  const fetchBills = useStore(state => state.fetchBills);
+  const departments = useStore(state => state.departments);
+  const fetchDepartments = useStore(state => state.fetchDepartments);
   const [selectedDept, setSelectedDept] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'All' | 'Completed' | 'Processing'>('All');
@@ -28,7 +31,7 @@ export default function RevenueReports() {
     if (fetchDepartments) {
       fetchDepartments();
     }
-  }, [fetchBills, fetchDepartments]);
+  }, []);
 
   const now = new Date();
   const currentYear = now.getFullYear();

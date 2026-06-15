@@ -7,7 +7,8 @@ import { generateDoctorPatientsTablePDF } from '../../lib/pdfUtils';
 
 export default function DoctorPatientRecords() {
   const navigate = useNavigate();
-  const { currentUser, logout } = useStore();
+  const currentUser = useStore(state => state.currentUser);
+  const logout = useStore(state => state.logout);
   const [searchTerm, setSearchTerm] = useState('');
   const [editingPatient, setEditingPatient] = useState<any>(null);
   const [dateFilter, setDateFilter] = useState<'today' | 'week' | 'month' | 'custom' | 'all'>('all');

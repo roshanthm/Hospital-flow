@@ -39,7 +39,10 @@ const navItems: NavItem[] = [
 ];
 
 export function AppLayout() {
-  const { currentUser, logout, users, fetchUsers } = useStore();
+  const currentUser = useStore(state => state.currentUser);
+  const logout = useStore(state => state.logout);
+  const users = useStore(state => state.users);
+  const fetchUsers = useStore(state => state.fetchUsers);
   const location = useLocation();
   const navigate = useNavigate();
   const [isSidebarOpen, setIsSidebarOpen] = React.useState(true);
@@ -53,10 +56,10 @@ export function AppLayout() {
   const [showSearchModal, setShowSearchModal] = React.useState(false);
 
   React.useEffect(() => {
-    if (currentUser?.role === 'ADMIN') {
+    if (currentUser?.role === 'ADMIN' && (!users || users.length === 0)) {
       fetchUsers();
     }
-  }, [currentUser]);
+  }, [currentUser, users, fetchUsers]);
 
   if (!currentUser) {
     return <Navigate to="/login" replace />;
@@ -444,7 +447,7 @@ export function AppLayout() {
 }
 
 export function ProtectedRoute({ roles, useLayout = true }: { roles: UserRole[], useLayout?: boolean }) {
-  const { currentUser } = useStore();
+  const currentUser = useStore(state => state.currentUser);
   
   if (!currentUser) return <Navigate to="/login" replace />;
   

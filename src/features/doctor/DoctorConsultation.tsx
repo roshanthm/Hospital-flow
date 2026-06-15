@@ -30,7 +30,8 @@ const getExpiryStatus = (expiryDateStr: string | null | Date, warningWindowDays:
 export default function DoctorConsultation() {
   const { tokenId } = useParams();
   const navigate = useNavigate();
-  const { currentUser, logout } = useStore();
+  const currentUser = useStore(state => state.currentUser);
+  const logout = useStore(state => state.logout);
   const queryClient = useQueryClient();
 
   const [searchQuery, setSearchQuery] = useState('');

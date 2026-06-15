@@ -5,17 +5,16 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
 export default function DoctorDashboard() {
-  const { currentUser, logout, updateDutyStatus, fetchMe } = useStore();
+  const currentUser = useStore(state => state.currentUser);
+  const logout = useStore(state => state.logout);
+  const updateDutyStatus = useStore(state => state.updateDutyStatus);
+  const fetchMe = useStore(state => state.fetchMe);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   React.useEffect(() => {
     fetchMe();
-    const interval = setInterval(() => {
-      fetchMe();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [fetchMe]);
+  }, []);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<any>(null);
@@ -73,7 +72,7 @@ export default function DoctorDashboard() {
       if (!res.ok) throw new Error('Failed to fetch tokens');
       return res.json();
     },
-    refetchInterval: 3000
+    refetchInterval: 30000
   });
 
   const { data: tasks = [], isLoading: isLoadingTasks } = useQuery({

@@ -23,7 +23,17 @@ const calculateAge = (dobString: string): string => {
 
 export default function PatientRegistration() {
   const navigate = useNavigate();
-  const { patients, addPatient, users, tokens, addActivityLog, fetchPatients, fetchUsers, fetchTokens, logout, currentUser, addAppointment } = useStore();
+  const patients = useStore(state => state.patients);
+  const addPatient = useStore(state => state.addPatient);
+  const users = useStore(state => state.users);
+  const tokens = useStore(state => state.tokens);
+  const addActivityLog = useStore(state => state.addActivityLog);
+  const fetchPatients = useStore(state => state.fetchPatients);
+  const fetchUsers = useStore(state => state.fetchUsers);
+  const fetchTokens = useStore(state => state.fetchTokens);
+  const logout = useStore(state => state.logout);
+  const currentUser = useStore(state => state.currentUser);
+  const addAppointment = useStore(state => state.addAppointment);
 
   const [step, setStep] = useState<1 | 2>(1);
   const [headerSearchTerm, setHeaderSearchTerm] = useState('');
@@ -98,15 +108,7 @@ export default function PatientRegistration() {
     fetchPatients();
     fetchUsers();
     fetchTokens();
-
-    const intervalId = setInterval(() => {
-      fetchPatients();
-      fetchUsers();
-      fetchTokens();
-    }, 5000);
-
-    return () => clearInterval(intervalId);
-  }, [fetchPatients, fetchUsers, fetchTokens]);
+  }, []);
 
   const getDeptDoctorsInRegistration = (deptKey: string) => {
     const activeDocs = (users || []).filter(u => u.role === 'DOCTOR' && u.isActive !== false);

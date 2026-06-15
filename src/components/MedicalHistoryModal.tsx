@@ -95,7 +95,7 @@ const getPatientTemp = (p: any) => {
 };
 
 export default function MedicalHistoryModal({ isOpen, onClose, patientName, history, patient }: MedicalHistoryModalProps) {
-  const { users } = useStore();
+  const users = useStore(state => state.users);
   return (
     <AnimatePresence>
       {isOpen && (

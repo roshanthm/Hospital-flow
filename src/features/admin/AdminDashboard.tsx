@@ -12,7 +12,7 @@ import {
   Calendar, Download, Bell, HelpCircle, 
   CheckCircle2, TrendingUp, DollarSign, ListTodo, ShieldAlert,
   Receipt, FileText, ArrowRight, UserCheck, UserX, Search,
-  ChevronDown, ChevronUp
+  ChevronDown, ChevronUp, RefreshCw
 } from "lucide-react";
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, 
@@ -30,10 +30,20 @@ const formatLocalDate = (dateObj: Date): string => {
 };
 
 export default function AdminDashboard() {
-  const { 
-    users, patients, appointments, activityLogs, tokens, prescriptions, bills,
-    fetchUsers, fetchPatients, fetchTokens, fetchPharmacyQueue, fetchBills, fetchActivityLogs
-  } = useStore();
+  const users = useStore(state => state.users);
+  const patients = useStore(state => state.patients);
+  const appointments = useStore(state => state.appointments);
+  const activityLogs = useStore(state => state.activityLogs);
+  const tokens = useStore(state => state.tokens);
+  const prescriptions = useStore(state => state.prescriptions);
+  const bills = useStore(state => state.bills);
+
+  const fetchUsers = useStore(state => state.fetchUsers);
+  const fetchPatients = useStore(state => state.fetchPatients);
+  const fetchTokens = useStore(state => state.fetchTokens);
+  const fetchPharmacyQueue = useStore(state => state.fetchPharmacyQueue);
+  const fetchBills = useStore(state => state.fetchBills);
+  const fetchActivityLogs = useStore(state => state.fetchActivityLogs);
 
   const [consultations, setConsultations] = useState<any[]>([]);
   const [timeFilter, setTimeFilter] = useState<'30days' | '24h' | '7days'>('30days');
@@ -132,11 +142,7 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     fetchAttendance();
-    const interval = setInterval(() => {
-      fetchAttendance(true);
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [fetchAttendance]);
+  }, [attendanceFilter, attStartInput, attEndInput]);
 
   useEffect(() => {
     fetchUsers();
@@ -172,15 +178,6 @@ export default function AdminDashboard() {
       }
     };
     loadResetRequests();
-
-    // Refresh periodically
-    const interval = setInterval(() => {
-      loadResetRequests();
-      fetchPatients();
-      fetchTokens();
-      loadConsultations();
-    }, 3000);
-    return () => clearInterval(interval);
   }, []);
 
   // Define date filtering logic based on selected range
@@ -784,6 +781,38 @@ export default function AdminDashboard() {
     }));
   };
 
+  const handleManualRefresh = async () => {
+    const toastId = toast.loading('Refreshing dashboard metrics...');
+    try {
+      await Promise.all([
+        fetchAttendance(true),
+        fetchUsers(),
+        fetchPatients(),
+        fetchTokens(),
+        fetchPharmacyQueue(),
+        fetchBills(),
+        fetchActivityLogs(),
+        (async () => {
+          const res = await authFetch('/api/consultations');
+          if (res.ok) {
+            setConsultations(await res.json());
+          }
+        })(),
+        (async () => {
+          const res = await authFetch('/api/admin/password-reset-requests');
+          if (res.ok) {
+            const data = await res.json();
+            setPendingResetsCount(data.length);
+          }
+        })()
+      ]);
+      toast.success('Dashboard metrics synchronized in real-time!', { id: toastId });
+    } catch (err: any) {
+      console.error(err);
+      toast.error('Failed to sync dashboard metrics.', { id: toastId });
+    }
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       {/* Title Header with the exact MedFlow design elements */}
@@ -793,6 +822,15 @@ export default function AdminDashboard() {
           <p className="text-[#64748b] mt-1 text-sm font-medium">Real-time facility performance and administrative analytics.</p>
         </div>
         <div className="flex items-center gap-3">
+          <button 
+            id="btn-manual-refresh-admin"
+            onClick={handleManualRefresh}
+            className="h-10 px-4 bg-white border border-[#d7dadd] rounded-lg text-sm font-semibold flex items-center gap-2 hover:bg-[#f1f4f7] text-[#1e293b] shadow-sm transition-all active:scale-[0.98] cursor-pointer"
+            title="Refresh dashboard metrics"
+          >
+            <RefreshCw size={15} />
+            Refresh
+          </button>
           <button 
             id="btn-filter-period"
             onClick={() => {
