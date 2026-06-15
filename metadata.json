@@ -1,8 +1,0 @@
-{
-  "name": "MedFlow Pro",
-  "description": "Enterprise-grade Hospital Workflow Management System for seamless departmental coordination.",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
-}
