@@ -26,6 +26,29 @@ async function comparePassword(password: string, hash: string): Promise<boolean>
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// --- LIGHTWEIGHT IN-MEMORY CACHING SYSTEM (PHASE 8) ---
+interface CacheEntry {
+  data: any;
+  expiresAt: number;
+}
+const serverCacheMap = new Map<string, CacheEntry>();
+
+function getCachedData(key: string): any {
+  const entry = serverCacheMap.get(key);
+  if (entry && entry.expiresAt > Date.now()) {
+    return entry.data;
+  }
+  return null;
+}
+
+function setCachedData(key: string, data: any, ttlMs: number = 10 * 60 * 1000): void {
+  serverCacheMap.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
+function invalidateCachedData(key: string): void {
+  serverCacheMap.delete(key);
+}
+
 // --- DOCTOR DUTY SHIFT CONFIGS & MANAGEMENT HELPERS ---
 async function getShiftSettings() {
   try {
@@ -1829,11 +1852,46 @@ async function startServer() {
       const timezoneOffsetMin = timezoneOffsetHeader ? parseInt(timezoneOffsetHeader as string, 10) : null;
       await checkAndResetDoctorShifts(timezoneOffsetMin);
 
-      const { page, limit } = req.query;
+      const { page, limit, search } = req.query;
       const pageNum = page ? parseInt(String(page), 10) : null;
       const limitNum = limit ? parseInt(String(limit), 10) : null;
 
-      const whereClause = { isActive: true };
+      const whereClause: any = { isActive: true };
+      if (search) {
+        const cleanSearch = String(search).trim();
+        whereClause.OR = [
+          { name: { contains: cleanSearch, mode: 'insensitive' } },
+          { email: { contains: cleanSearch, mode: 'insensitive' } },
+          { employeeId: { contains: cleanSearch, mode: 'insensitive' } },
+          { designation: { contains: cleanSearch, mode: 'insensitive' } }
+        ];
+      }
+
+      const selectClause = {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        department: true,
+        isActive: true,
+        dutyStatus: true,
+        lastActivatedAt: true,
+        shiftType: true,
+        employeeId: true,
+        designation: true,
+        phone: true,
+        dateJoined: true,
+        employmentStatus: true,
+        notes: true,
+        requiresPasswordChange: true,
+        addressLine1: true,
+        addressLine2: true,
+        city: true,
+        state: true,
+        postalCode: true,
+        country: true,
+        createdAt: true
+      };
 
       if (pageNum && limitNum) {
         const skip = (pageNum - 1) * limitNum;
@@ -1843,31 +1901,7 @@ async function startServer() {
             where: whereClause,
             skip,
             take: limitNum,
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              role: true,
-              department: true,
-              isActive: true,
-              dutyStatus: true,
-              lastActivatedAt: true,
-              shiftType: true,
-              employeeId: true,
-              designation: true,
-              phone: true,
-              dateJoined: true,
-              employmentStatus: true,
-              notes: true,
-              requiresPasswordChange: true,
-              addressLine1: true,
-              addressLine2: true,
-              city: true,
-              state: true,
-              postalCode: true,
-              country: true,
-              createdAt: true
-            }
+            select: selectClause
           })
         ]);
         return res.json({
@@ -1881,31 +1915,7 @@ async function startServer() {
 
       const users = await prisma.user.findMany({
         where: whereClause,
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true,
-          department: true,
-          isActive: true,
-          dutyStatus: true,
-          lastActivatedAt: true,
-          shiftType: true,
-          employeeId: true,
-          designation: true,
-          phone: true,
-          dateJoined: true,
-          employmentStatus: true,
-          notes: true,
-          requiresPasswordChange: true,
-          addressLine1: true,
-          addressLine2: true,
-          city: true,
-          state: true,
-          postalCode: true,
-          country: true,
-          createdAt: true
-        }
+        select: selectClause
       });
       res.json(users);
     } catch (error) {
@@ -2346,7 +2356,12 @@ async function startServer() {
   // GET /api/duty-settings
   app.get('/api/duty-settings', authenticateJWT, requireRole(['ADMIN', 'DOCTOR']), async (req, res) => {
     try {
+      const cacheKey = 'duty-settings';
+      const cached = getCachedData(cacheKey);
+      if (cached) return res.json(cached);
+
       const settings = await getShiftSettings();
+      setCachedData(cacheKey, settings, 10 * 60 * 1000);
       res.json(settings);
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch duty settings.' });
@@ -2386,6 +2401,7 @@ async function startServer() {
         console.warn('Failed to write duty settings backup file:', fileErr);
       }
 
+      invalidateCachedData('duty-settings');
       res.json({ success: true, settings });
     } catch (error) {
       console.error(error);
@@ -2396,6 +2412,10 @@ async function startServer() {
   // GET /api/departments
   app.get('/api/departments', authenticateJWT, async (req, res) => {
     try {
+      const cacheKey = 'departments';
+      const cached = getCachedData(cacheKey);
+      if (cached) return res.json(cached);
+
       let depts = await prisma.department.findMany({
         orderBy: { name: 'asc' }
       });
@@ -2423,6 +2443,7 @@ async function startServer() {
           orderBy: { name: 'asc' }
         });
       }
+      setCachedData(cacheKey, depts, 15 * 60 * 1000);
       res.json(depts);
     } catch (error) {
       console.error('Failed to fetch departments:', error);
@@ -2447,6 +2468,7 @@ async function startServer() {
       const dept = await prisma.department.create({
         data: { name: formattedName }
       });
+      invalidateCachedData('departments');
       res.json(dept);
     } catch (error) {
       console.error('Failed to create department:', error);
@@ -2972,7 +2994,7 @@ async function startServer() {
   });
 
   app.get('/api/tokens', authenticateJWT, requireRole(['RECEPTION', 'DOCTOR', 'PHARMACY', 'ADMIN']), async (req: any, res: any) => {
-    let { doctorId, status, page, limit, patientId, today, active } = req.query;
+    let { doctorId, status, page, limit, patientId, today, active, search } = req.query;
     
     // Strict boundary: A Doctor must only see their own assigned queue/tokens, derived securely from JWT.
     if (req.user.role === 'DOCTOR') {
@@ -3006,6 +3028,20 @@ async function startServer() {
         whereClause.status = {
           in: ['WAITING', 'IN_CONSULTATION']
         };
+      }
+
+      if (search) {
+        const cleanSearch = String(search).trim();
+        whereClause.AND = [
+          ...(whereClause.AND || []),
+          {
+            OR: [
+              { tokenNumber: { contains: cleanSearch, mode: 'insensitive' } },
+              { patient: { name: { contains: cleanSearch, mode: 'insensitive' } } },
+              { patient: { phone: { contains: cleanSearch } } }
+            ]
+          }
+        ];
       }
 
       const includeClause = { 
@@ -3442,15 +3478,43 @@ async function startServer() {
         }
       }
 
+      const { page, limit } = req.query;
+      const pageNum = page ? parseInt(String(page), 10) : null;
+      const limitNum = limit ? parseInt(String(limit), 10) : null;
+
+      const whereClause = { patientId: req.params.id };
+      const includeClause = {
+        doctor: { select: { name: true, department: true } },
+        visitRecord: { include: { token: true } },
+        prescription: { include: { items: true, pharmacyQueue: { include: { dispensingLog: true } } } },
+        labRequests: true,
+        referrals: { include: { targetDoc: { select: { name: true, department: true } } } }
+      };
+
+      if (pageNum && limitNum) {
+        const skip = (pageNum - 1) * limitNum;
+        const [total, data] = await Promise.all([
+          prisma.consultation.count({ where: whereClause }),
+          prisma.consultation.findMany({
+            where: whereClause,
+            include: includeClause,
+            orderBy: { createdAt: 'desc' },
+            skip,
+            take: limitNum
+          })
+        ]);
+        return res.json({
+          data,
+          page: pageNum,
+          limit: limitNum,
+          total,
+          hasNextPage: total > pageNum * limitNum
+        });
+      }
+
       const history = await prisma.consultation.findMany({
-        where: { patientId: req.params.id },
-        include: {
-          doctor: { select: { name: true, department: true } },
-          visitRecord: { include: { token: true } },
-          prescription: { include: { items: true, pharmacyQueue: { include: { dispensingLog: true } } } },
-          labRequests: true,
-          referrals: { include: { targetDoc: { select: { name: true, department: true } } } }
-        },
+        where: whereClause,
+        include: includeClause,
         orderBy: { createdAt: 'desc' }
       });
       res.json(history);
@@ -3591,9 +3655,23 @@ async function startServer() {
 
   app.get('/api/pharmacy/history', authenticateJWT, requireRole(['PHARMACY']), async (req, res) => {
     try {
-      const { page, limit } = req.query;
+      const { page, limit, search } = req.query;
       const pageNum = page ? parseInt(String(page), 10) : null;
       const limitNum = limit ? parseInt(String(limit), 10) : null;
+      const searchStr = search ? String(search).trim() : '';
+
+      const whereClause: any = {};
+      if (searchStr) {
+        whereClause.pharmacyQueue = {
+          prescription: {
+            OR: [
+              { patient: { name: { contains: searchStr, mode: 'insensitive' } } },
+              { patient: { phone: { contains: searchStr } } },
+              { doctor: { name: { contains: searchStr, mode: 'insensitive' } } }
+            ]
+          }
+        };
+      }
 
       const includeClause = {
         pharmacyQueue: {
@@ -3614,8 +3692,9 @@ async function startServer() {
       if (pageNum && limitNum) {
         const skip = (pageNum - 1) * limitNum;
         const [total, data] = await Promise.all([
-          prisma.pharmacyDispensingLog.count(),
+          prisma.pharmacyDispensingLog.count({ where: whereClause }),
           prisma.pharmacyDispensingLog.findMany({
+            where: whereClause,
             include: includeClause,
             orderBy: { dispensedAt: 'desc' },
             skip,
@@ -3632,6 +3711,7 @@ async function startServer() {
       }
 
       const logs = await prisma.pharmacyDispensingLog.findMany({
+        where: whereClause,
         include: includeClause,
         orderBy: { dispensedAt: 'desc' },
         take: 1000
@@ -4079,13 +4159,49 @@ async function startServer() {
   // GET /api/inventory
   app.get('/api/inventory', authenticateJWT, requireRole(['PHARMACY', 'ADMIN', 'DOCTOR']), async (req, res) => {
     try {
-      const items = await prisma.inventoryItem.findMany({
-        where: {
-          NOT: { status: 'DELETED' }
-        },
-        include: { supplier: true },
-        orderBy: { name: 'asc' }
-      });
+      const { page, limit, search } = req.query;
+      const pageNum = page ? parseInt(String(page), 10) : null;
+      const limitNum = limit ? parseInt(String(limit), 10) : null;
+      const searchStr = search ? String(search).trim() : '';
+
+      const whereClause: any = {
+        NOT: { status: 'DELETED' }
+      };
+
+      if (searchStr) {
+        whereClause.OR = [
+          { name: { contains: searchStr, mode: 'insensitive' } },
+          { genericName: { contains: searchStr, mode: 'insensitive' } },
+          { brandName: { contains: searchStr, mode: 'insensitive' } },
+          { itemCode: { contains: searchStr, mode: 'insensitive' } }
+        ];
+      }
+
+      let total = 0;
+      let items: any[] = [];
+
+      if (pageNum && limitNum) {
+        const skip = (pageNum - 1) * limitNum;
+        const [countVal, fetchedItems] = await Promise.all([
+          prisma.inventoryItem.count({ where: whereClause }),
+          prisma.inventoryItem.findMany({
+            where: whereClause,
+            include: { supplier: true },
+            orderBy: { name: 'asc' },
+            skip,
+            take: limitNum
+          })
+        ]);
+        total = countVal;
+        items = fetchedItems;
+      } else {
+        items = await prisma.inventoryItem.findMany({
+          where: whereClause,
+          include: { supplier: true },
+          orderBy: { name: 'asc' },
+          take: 2000
+        });
+      }
 
       const allActiveBatches = await prisma.inventoryItem.findMany({
         where: {
@@ -4142,7 +4258,17 @@ async function startServer() {
         };
       });
 
-      res.json(enhancedItems);
+      if (pageNum && limitNum) {
+        res.json({
+          data: enhancedItems,
+          page: pageNum,
+          limit: limitNum,
+          total,
+          hasNextPage: total > pageNum * limitNum
+        });
+      } else {
+        res.json(enhancedItems);
+      }
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: 'Failed to fetch inventory items' });
@@ -4571,9 +4697,14 @@ async function startServer() {
   // GET /api/suppliers
   app.get('/api/suppliers', authenticateJWT, requireRole(['PHARMACY', 'ADMIN']), async (req, res) => {
     try {
+      const cacheKey = 'suppliers';
+      const cached = getCachedData(cacheKey);
+      if (cached) return res.json(cached);
+
       const suppliers = await prisma.supplier.findMany({
         orderBy: { name: 'asc' }
       });
+      setCachedData(cacheKey, suppliers, 15 * 60 * 1000); // 15 minutes cache
       res.json(suppliers);
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch suppliers' });
@@ -4586,6 +4717,7 @@ async function startServer() {
       const supplier = await prisma.supplier.create({
         data: req.body
       });
+      invalidateCachedData('suppliers');
       res.json(supplier);
     } catch (error) {
       res.status(500).json({ error: 'Failed to create supplier' });

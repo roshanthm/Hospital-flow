@@ -142,7 +142,7 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     fetchAttendance();
-  }, [attendanceFilter, attStartInput, attEndInput]);
+  }, [fetchAttendance]);
 
   const [summaryData, setSummaryData] = useState<any>(null);
   const [isSummaryLoading, setIsSummaryLoading] = useState(true);

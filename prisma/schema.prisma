@@ -113,6 +113,7 @@ model Token {
 
   @@index([patientId])
   @@index([doctorId])
+  @@index([status, createdAt])
 }
 
 model DoctorQueue {
@@ -213,6 +214,7 @@ model Consultation {
 
   @@index([patientId])
   @@index([doctorId])
+  @@index([patientId, createdAt])
 }
 
 model Prescription {
@@ -287,6 +289,7 @@ model Bill {
   items         BillItem[]
 
   @@index([patientId])
+  @@index([status, createdAt])
 }
 
 model BillItem {
