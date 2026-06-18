@@ -115,16 +115,28 @@ const refreshAccessToken = async (): Promise<string | null> => {
       };
       useStore.setState({ currentUser: updatedUser });
       return refreshData.accessToken;
+    } else {
+      if (refreshRes.status === 401 || refreshRes.status === 403) {
+        console.warn('Session refresh token has expired or is invalid. Purging local state.');
+        useStore.setState({ currentUser: null });
+      }
     }
   } catch (refreshErr) {
-    console.error('Failed to auto-refresh token:', refreshErr);
+    console.error('Failed to auto-refresh token due to network/server state:', refreshErr);
   }
   return null;
 };
 
 export const authFetch = async (url: string, options: RequestInit = {}): Promise<Response> => {
-  const state = useStore.getState();
-  const token = state.currentUser?.accessToken;
+  let state = useStore.getState();
+
+  // If a refresh is already in progress, wait for it first to use the new token immediately
+  if (isRefreshing) {
+    await isRefreshing;
+    state = useStore.getState();
+  }
+
+  let token = state.currentUser?.accessToken;
 
   const headers: Record<string, string> = {
     'X-Timezone-Offset': String(new Date().getTimezoneOffset()),
@@ -153,6 +165,28 @@ export const authFetch = async (url: string, options: RequestInit = {}): Promise
   }
 
   if (res.status === 401 && state.currentUser) {
+    // Audit current token value - if already updated by an concurrent request, retry immediately
+    const latestToken = useStore.getState().currentUser?.accessToken;
+    if (latestToken && latestToken !== token) {
+      const retryHeaders = {
+        ...options.headers as Record<string, string>,
+        'Authorization': `Bearer ${latestToken}`
+      };
+      try {
+        return await fetch(url, {
+          ...fetchOptions,
+          headers: retryHeaders
+        });
+      } catch (retryErr) {
+        console.warn('Network fetch retry error for refreshed token:', url, retryErr);
+        return new Response(JSON.stringify({ error: 'Clinical API is unreachable on session retry.' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // Trigger single unified token refresh
     if (!isRefreshing) {
       isRefreshing = refreshAccessToken().finally(() => {
         isRefreshing = null;
@@ -178,8 +212,6 @@ export const authFetch = async (url: string, options: RequestInit = {}): Promise
           headers: { 'Content-Type': 'application/json' }
         });
       }
-    } else {
-      useStore.setState({ currentUser: null });
     }
   }
 

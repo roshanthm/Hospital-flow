@@ -89,11 +89,12 @@ export default function DoctorPatientRecords() {
     navigate('/login');
   };
 
-  // Fetch patients for the current doctor
+  // Fetch patients for the current doctor with index-backed server-side filters
   const { data: activePatientsRaw = [], isLoading: isLoadingTokens } = useQuery({
-    queryKey: ['doctorPatients'],
+    queryKey: ['doctorPatients', dateFilter, startDate, endDate, searchTerm],
     queryFn: async () => {
-      const res = await authFetch('/api/patients');
+      const url = `/api/patients?dateFilter=${dateFilter}&startDate=${startDate || ''}&endDate=${endDate || ''}&search=${encodeURIComponent(searchTerm)}`;
+      const res = await authFetch(url);
       if (!res.ok) throw new Error('Failed to fetch patients');
       return res.json();
     }

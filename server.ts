@@ -1856,6 +1856,13 @@ async function startServer() {
       const pageNum = page ? parseInt(String(page), 10) : null;
       const limitNum = limit ? parseInt(String(limit), 10) : null;
 
+      const isCacheable = !search && !pageNum && !limitNum;
+      const cacheKey = 'users_list_all';
+      if (isCacheable) {
+        const cached = getCachedData(cacheKey);
+        if (cached) return res.json(cached);
+      }
+
       const whereClause: any = { isActive: true };
       if (search) {
         const cleanSearch = String(search).trim();
@@ -1917,6 +1924,9 @@ async function startServer() {
         where: whereClause,
         select: selectClause
       });
+      if (isCacheable) {
+        setCachedData(cacheKey, users, 10 * 60 * 1000); // 10 minutes cache
+      }
       res.json(users);
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch users' });
@@ -2150,6 +2160,7 @@ async function startServer() {
       const user = await prisma.user.create({
         data: userData
       });
+      invalidateCachedData('users_list_all');
       res.json(user);
     } catch (error: any) {
       console.error(error);
@@ -2262,6 +2273,7 @@ async function startServer() {
         });
       }
 
+      invalidateCachedData('users_list_all');
       res.json(user);
     } catch (error: any) {
       console.error(error);
@@ -2346,6 +2358,7 @@ async function startServer() {
         return updatedUser;
       });
 
+      invalidateCachedData('users_list_all');
       res.json(user);
     } catch (error) {
       console.error(error);
@@ -2537,6 +2550,7 @@ async function startServer() {
         console.error('Failed to write deletion activity log', logErr);
       }
 
+      invalidateCachedData('users_list_all');
       res.json({ message: 'User account deactivated successfully', user });
     } catch (error) {
       console.error(error);
@@ -2631,12 +2645,37 @@ async function startServer() {
 
   // Patients
   app.get('/api/patients', authenticateJWT, requireRole(['RECEPTION', 'DOCTOR', 'PHARMACY', 'ADMIN']), async (req: any, res: any) => {
-    const { search, page, limit } = req.query;
+    const { search, page, limit, dateFilter, startDate, endDate } = req.query;
     try {
       const searchStr = search ? String(search).trim() : '';
       const isDoctor = req.user.role === 'DOCTOR';
       const pageNum = page ? parseInt(String(page), 10) : null;
       const limitNum = limit ? parseInt(String(limit), 10) : null;
+
+      let dateClause: any = null;
+      if (dateFilter) {
+        if (dateFilter === 'today') {
+          const todayStart = new Date();
+          todayStart.setHours(0, 0, 0, 0);
+          dateClause = { gte: todayStart };
+        } else if (dateFilter === 'week') {
+          const weekAgo = new Date();
+          weekAgo.setDate(weekAgo.getDate() - 7);
+          weekAgo.setHours(0, 0, 0, 0);
+          dateClause = { gte: weekAgo };
+        } else if (dateFilter === 'month') {
+          const monthAgo = new Date();
+          monthAgo.setDate(monthAgo.getDate() - 30);
+          monthAgo.setHours(0, 0, 0, 0);
+          dateClause = { gte: monthAgo };
+        } else if (dateFilter === 'custom' && startDate) {
+          const sDate = new Date(String(startDate));
+          sDate.setHours(0, 0, 0, 0);
+          const eDate = endDate ? new Date(String(endDate)) : new Date();
+          eDate.setHours(23, 59, 59, 999);
+          dateClause = { gte: sDate, lte: eDate };
+        }
+      }
 
       const whereClause: any = {
         AND: [
@@ -2649,9 +2688,14 @@ async function startServer() {
           } : {},
           isDoctor ? {
             consultations: {
-              some: { doctorId: req.user.userId }
+              some: {
+                doctorId: req.user.userId,
+                ...(dateClause ? { createdAt: dateClause } : {})
+              }
             }
-          } : {}
+          } : (dateClause ? {
+            createdAt: dateClause
+          } : {})
         ]
       };
 
@@ -2738,14 +2782,50 @@ async function startServer() {
         }
       };
 
-      const patients = await prisma.patient.findMany({
-        where: whereClause,
-        include: includeClause,
-        orderBy: {
-          createdAt: 'desc'
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Transfer-Encoding', 'chunked');
+      res.write('[');
+
+      let skip = 0;
+      const batchSize = 1000;
+      let hasMore = true;
+      let isFirst = true;
+
+      while (hasMore) {
+        const batch = await prisma.patient.findMany({
+          where: whereClause,
+          include: includeClause,
+          orderBy: {
+            createdAt: 'desc'
+          },
+          skip: skip,
+          take: batchSize
+        });
+
+        if (batch.length === 0) {
+          hasMore = false;
+          break;
         }
-      });
-      res.json(patients);
+
+        for (const item of batch) {
+          if (!isFirst) {
+            res.write(',');
+          } else {
+            isFirst = false;
+          }
+          res.write(JSON.stringify(item));
+        }
+
+        skip += batch.length;
+        if (batch.length < batchSize) {
+          hasMore = false;
+        }
+
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      res.write(']');
+      res.end();
     } catch (error) {
       console.error('Error exporting patients:', error);
       res.status(500).json({ error: 'Failed to export patients' });
@@ -3101,10 +3181,52 @@ async function startServer() {
       doctorId = req.user.userId;
     }
 
+    const { startDate, endDate } = req.query;
+
+    if (startDate && isNaN(Date.parse(String(startDate)))) {
+      return res.status(400).json({ 
+        error: 'Date parsing failed', 
+        reason: `Invalid format for startDate: "${startDate}". Expected format YYYY-MM-DD.` 
+      });
+    }
+
+    if (endDate && isNaN(Date.parse(String(endDate)))) {
+      return res.status(400).json({ 
+        error: 'Date parsing failed', 
+        reason: `Invalid format for endDate: "${endDate}". Expected format YYYY-MM-DD.` 
+      });
+    }
+
+    let start: Date | undefined;
+    let end: Date | undefined;
+
+    if (startDate) {
+      start = new Date(String(startDate));
+      start.setHours(0, 0, 0, 0);
+    }
+    if (endDate) {
+      end = new Date(String(endDate));
+      end.setHours(23, 59, 59, 999);
+    }
+
+    if (start && end && start > end) {
+      return res.status(400).json({ 
+        error: 'Invalid range', 
+        reason: `startDate (${startDate}) cannot be after endDate (${endDate}).` 
+      });
+    }
+
     try {
       const whereClause: any = {
         ...(doctorId && { doctorId: String(doctorId) })
       };
+
+      if (start && end) {
+        whereClause.createdAt = {
+          gte: start,
+          lte: end
+        };
+      }
 
       const includeClause = { 
         patient: true,
@@ -3124,13 +3246,103 @@ async function startServer() {
         }
       };
 
-      const tokens = await prisma.token.findMany({
-        where: whereClause,
-        include: includeClause,
-        orderBy: { createdAt: 'asc' }
+      // 1. Calculate operational metrics efficiently using index-backed Prisma aggregate/count queries
+      const matchingTokensCount = await prisma.token.count({ where: whereClause });
+
+      if (matchingTokensCount === 0) {
+        return res.status(404).json({
+          error: 'No tokens found',
+          reason: `No queue entry tokens were found matching the filters within 'Token' active database table for selected date span: ${startDate || 'all'} to ${endDate || 'all'}. (No matching records on 'createdAt' date column; Status is verified, but 0 records exist).`
+        });
+      }
+
+      const consultationsCount = await prisma.token.count({
+        where: {
+          ...whereClause,
+          visitRecord: {
+            consultation: { isNot: null }
+          }
+        }
       });
-      res.json(tokens);
+
+      const completedVisitsCount = await prisma.token.count({
+        where: {
+          ...whereClause,
+          OR: [
+            { status: 'COMPLETED' },
+            { visitRecord: { isNot: null } }
+          ]
+        }
+      });
+
+      const doctorsGroup = await prisma.token.groupBy({
+        by: ['doctorId'],
+        where: {
+          ...whereClause,
+          doctorId: { not: null }
+        }
+      });
+      const assignedDoctorsCount = doctorsGroup.length;
+
+      console.log('HIGH FIBRE EXPORT METRICS RESOLVED:', {
+        matchingTokensCount,
+        consultationsCount,
+        completedVisitsCount,
+        assignedDoctorsCount
+      });
+
+      // 2. Set metrics headers
+      res.setHeader('x-matching-tokens-count', String(matchingTokensCount));
+      res.setHeader('x-consultation-count', String(consultationsCount));
+      res.setHeader('x-completed-visits-count', String(completedVisitsCount));
+      res.setHeader('x-assigned-doctors-count', String(assignedDoctorsCount));
+
+      // 3. Stream back JSON array in cursorless batches to avoid OOM heap crash under load
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Transfer-Encoding', 'chunked');
+      res.write('[');
+
+      let skip = 0;
+      const batchSize = 1000;
+      let hasMore = true;
+      let isFirst = true;
+
+      while (hasMore) {
+        const batch = await prisma.token.findMany({
+          where: whereClause,
+          include: includeClause,
+          orderBy: { createdAt: 'asc' },
+          skip: skip,
+          take: batchSize
+        });
+
+        if (batch.length === 0) {
+          hasMore = false;
+          break;
+        }
+
+        for (const item of batch) {
+          if (!isFirst) {
+            res.write(',');
+          } else {
+            isFirst = false;
+          }
+          res.write(JSON.stringify(item));
+        }
+
+        skip += batch.length;
+        if (batch.length < batchSize) {
+          hasMore = false;
+        }
+
+        // prevent holding event loop blockages under ultra large loops
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      res.write(']');
+      res.end();
     } catch (error) {
+      console.error('Failed to export tokens:', error);
       res.status(500).json({ error: 'Failed to export tokens' });
     }
   });
@@ -4000,12 +4212,49 @@ async function startServer() {
         }
       };
 
-      const bills = await prisma.bill.findMany({
-        include: includeClause,
-        orderBy: { createdAt: 'desc' }
-      });
-      res.json(bills);
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Transfer-Encoding', 'chunked');
+      res.write('[');
+
+      let skip = 0;
+      const batchSize = 1000;
+      let hasMore = true;
+      let isFirst = true;
+
+      while (hasMore) {
+        const batch = await prisma.bill.findMany({
+          include: includeClause,
+          orderBy: { createdAt: 'desc' },
+          skip: skip,
+          take: batchSize
+        });
+
+        if (batch.length === 0) {
+          hasMore = false;
+          break;
+        }
+
+        for (const item of batch) {
+          if (!isFirst) {
+            res.write(',');
+          } else {
+            isFirst = false;
+          }
+          res.write(JSON.stringify(item));
+        }
+
+        skip += batch.length;
+        if (batch.length < batchSize) {
+          hasMore = false;
+        }
+
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      res.write(']');
+      res.end();
     } catch (error) {
+      console.error('Failed to export bills:', error);
       res.status(500).json({ error: 'Failed to export bills' });
     }
   });

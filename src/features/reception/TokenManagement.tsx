@@ -436,10 +436,6 @@ export default function TokenManagement() {
     try {
       toast.info("Analyzing and compiling daily queue logs...");
       
-      // Fetch fresh tokens so we have today's DB snapshot
-      await useStore.getState().fetchTokens({ today: true }, true);
-      const allTokens = useStore.getState().tokens || [];
-
       let startDate: Date;
       let endDate: Date;
       let label = '';
@@ -477,21 +473,53 @@ export default function TokenManagement() {
         label = `${s.toLocaleDateString()} to ${e.toLocaleDateString()}`;
       }
 
-      // Filter tokens generated on selected day or range
-      const dayTokens = allTokens.filter(t => {
-        if (!t.createdAt) return false;
-        const creationTime = new Date(t.createdAt).getTime();
-        return creationTime >= startDate.getTime() && creationTime <= endDate.getTime();
-      }).map(t => {
-        const pat = t.patient || patients.find(p => p.id === t.patientId);
-        return { ...t, patient: pat };
-      });
-      
-      if (dayTokens.length === 0) {
-        toast.error(`No queue entry tokens were created in our system database for: ${label}`);
+      const formatToYYYYMMDD = (d: Date) => {
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      };
+
+      const startStr = formatToYYYYMMDD(startDate);
+      const endStr = formatToYYYYMMDD(endDate);
+
+      // Call high-fidelity export API with correct date params
+      const res = await authFetch(`/api/export/tokens?startDate=${startStr}&endDate=${endStr}`);
+
+      if (!res.ok) {
+        let errReason = `Export failed with status: ${res.status}`;
+        try {
+          const errData = await res.json();
+          errReason = errData.reason || errData.error || errReason;
+        } catch (e) {
+          // ignore parsing error
+        }
+        toast.error(`Operational Export Blocked: ${errReason}`);
         return;
       }
-      
+
+      const fetchedTokens = (await res.json() || []) as any[];
+
+      // Map patient objects for consistent rendering
+      const dayTokens = fetchedTokens.map(t => {
+        const pat = t.patient || patients.find((p: any) => p.id === t.patientId);
+        return { ...t, patient: pat };
+      });
+
+      // Verify and Calculate Operational Metrics
+      const totalTokensCount = dayTokens.length;
+      const completedCount = dayTokens.filter((t: any) => t.status === 'COMPLETED' || t.visitRecord).length;
+      const consultationsCount = dayTokens.filter((t: any) => t.visitRecord?.consultation).length;
+      const assignedDoctorsCount = new Set(dayTokens.map((t: any) => t.doctorId).filter(Boolean)).size;
+
+      console.log('CLIENT-SIDE EXPORT VERIFICATION METRICS:', {
+        totalTokensCount,
+        completedCount,
+        consultationsCount,
+        assignedDoctorsCount
+      });
+
+      toast.success(`Exporting ${totalTokensCount} active tokens (${completedCount} completed, ${consultationsCount} clinical consultations).`);
       generateDateWiseExportPDF(label, dayTokens, users || []);
       toast.success(`Clinical summary report generated for period [${label}]!`);
     } catch (err) {
