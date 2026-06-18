@@ -3870,7 +3870,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/bills', authenticateJWT, requireRole(['PHARMACY', 'ADMIN', 'DOCTOR']), async (req: any, res: any) => {
+  app.get('/api/bills', authenticateJWT, requireRole(['PHARMACY', 'ADMIN', 'DOCTOR', 'RECEPTION']), async (req: any, res: any) => {
     const { startDate, endDate, page, limit, status, search, patientId } = req.query;
     try {
       const pageNum = page ? parseInt(String(page), 10) : null;
@@ -3980,7 +3980,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/export/bills', authenticateJWT, requireRole(['PHARMACY', 'ADMIN', 'DOCTOR']), async (req: any, res: any) => {
+  app.get('/api/export/bills', authenticateJWT, requireRole(['PHARMACY', 'ADMIN', 'DOCTOR', 'RECEPTION']), async (req: any, res: any) => {
     try {
       const includeClause = {
         patient: true,
