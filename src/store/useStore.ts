@@ -280,7 +280,7 @@ export const useStore = create<HospitalState>()(
       fetchUsers: async (force) => {
         const now = Date.now();
         const state = get();
-        if (!force && now - (state.lastFetched['users'] || 0) < 10000) return;
+        if (!force && now - (state.lastFetched['users'] || 0) < 600000) return;
         
         const runFetch = async () => {
           try {
@@ -342,7 +342,7 @@ export const useStore = create<HospitalState>()(
           body: JSON.stringify(user)
         });
         if (res.ok) {
-          get().fetchUsers();
+          get().fetchUsers(true);
         } else {
           const err = await res.json();
           throw new Error(err.error || 'Failed to create user account');
@@ -355,7 +355,7 @@ export const useStore = create<HospitalState>()(
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(user)
         });
-        if (res.ok) get().fetchUsers();
+        if (res.ok) get().fetchUsers(true);
       },
       
       deleteUser: async (id) => {
@@ -363,7 +363,7 @@ export const useStore = create<HospitalState>()(
           method: 'DELETE'
         });
         if (res.ok) {
-          get().fetchUsers();
+          get().fetchUsers(true);
         } else {
           const err = await res.json();
           throw new Error(err.error || 'Failed to delete user');
@@ -389,7 +389,7 @@ export const useStore = create<HospitalState>()(
               ...updatedUser
             } as any
           });
-          await get().fetchUsers();
+          await get().fetchUsers(true);
         } else {
           const err = await res.json();
           throw new Error(err.error || 'Failed to update duty status');

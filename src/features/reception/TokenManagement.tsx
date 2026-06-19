@@ -77,15 +77,53 @@ export default function TokenManagement() {
 
   useEffect(() => {
     // Only preload tokens and users on mount. Avoid downloading the entire patient table.
-    fetchTokens({ today: true });
-    fetchUsers();
+    const syncData = () => {
+      if (document.visibilityState === 'visible') {
+        fetchTokens({ today: true });
+        fetchUsers();
+      }
+    };
 
-    const intervalId = setInterval(() => {
-      fetchTokens({ today: true });
-      fetchUsers();
+    // Initial sync
+    syncData();
+
+    // Setup visibility-aware polling interval (Tokens only, Users relies on cache TTL)
+    let intervalId = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchTokens({ today: true });
+      }
     }, 30000);
 
-    return () => clearInterval(intervalId);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchTokens({ today: true });
+        fetchUsers();
+        clearInterval(intervalId);
+        intervalId = setInterval(() => {
+          if (document.visibilityState === 'visible') {
+            fetchTokens({ today: true });
+          }
+        }, 30000);
+      } else {
+        clearInterval(intervalId);
+      }
+    };
+
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') {
+        fetchTokens({ today: true });
+        fetchUsers();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, []);
 
   // Support Closing via keys (Escape)

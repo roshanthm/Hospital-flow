@@ -65,6 +65,16 @@ export default function DoctorDashboard() {
     navigate('/login');
   };
 
+  const [windowVisible, setWindowVisible] = useState(document.visibilityState === 'visible');
+
+  React.useEffect(() => {
+    const handleVisibility = () => {
+      setWindowVisible(document.visibilityState === 'visible');
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
+
   const { data: tokens = [], isLoading } = useQuery({
     queryKey: ['doctorTokens'],
     queryFn: async () => {
@@ -72,7 +82,8 @@ export default function DoctorDashboard() {
       if (!res.ok) throw new Error('Failed to fetch tokens');
       return res.json();
     },
-    refetchInterval: 30000
+    refetchInterval: windowVisible ? 30000 : false,
+    refetchOnWindowFocus: true
   });
 
   const { data: tasks = [], isLoading: isLoadingTasks } = useQuery({

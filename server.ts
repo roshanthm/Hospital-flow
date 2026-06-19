@@ -485,6 +485,29 @@ async function startServer() {
     next();
   });
 
+  // Temporary Telemetry Middleware for Phase D Target Audits
+  app.use((req, res, next) => {
+    const targets = [
+      '/api/tokens',
+      '/api/users',
+      '/api/pharmacy/queue',
+      '/api/admin/operational-summary'
+    ];
+    const isTarget = targets.includes(req.path) || (req.path.startsWith('/api/patients/') && req.path.endsWith('/history'));
+
+    if (isTarget) {
+      const start = performance.now();
+      const originalSend = res.send;
+      res.send = function (body) {
+        const duration = (performance.now() - start).toFixed(2);
+        const sizeBytes = body ? (typeof body === 'string' ? Buffer.byteLength(body) : Buffer.byteLength(JSON.stringify(body))) : 0;
+        console.log(`[TELEMETRY] ${req.method} ${req.path} | DURATION: ${duration}ms | PAYLOAD: ${sizeBytes} bytes`);
+        return originalSend.apply(this, arguments as any);
+      };
+    }
+    next();
+  });
+
   // General API Throttling & Protection against brute-force and overhead
   app.use('/api', rateLimiter({
     windowMs: 60 * 1000, // 1 minute
@@ -1570,7 +1593,7 @@ async function startServer() {
             }
           },
           orderBy: { createdAt: 'desc' },
-          take: 500
+          take: 100
         })
       ]);
 
@@ -1615,73 +1638,137 @@ async function startServer() {
       const targetPatients = timeFilter === '24h' ? 5 : timeFilter === '7days' ? 20 : 100;
       const patientProgressPercent = Math.min(100, Math.round((periodPatientsCount / targetPatients) * 100));
 
-      // Dynamic chart points generation matching admin layout boundaries using database counts
-      const countPromises: Promise<any>[] = [];
+      // Dynamic chart points generation executed completely with parallel database counts
+      const chartData: any[] = [];
+
+      let patientGroups: Array<{ date: Date; count: number }> = [];
+      let consultationGroups: Array<{ date: Date; count: number }> = [];
 
       if (timeFilter === '24h') {
+        [patientGroups, consultationGroups] = await Promise.all([
+          prisma.$queryRaw<Array<{ date: Date; count: number }>>`
+            SELECT DATE_TRUNC('hour', "createdAt") as date, COUNT(*)::integer as count
+            FROM "Patient"
+            WHERE "createdAt" >= ${startDate}
+            GROUP BY DATE_TRUNC('hour', "createdAt")
+          `,
+          prisma.$queryRaw<Array<{ date: Date; count: number }>>`
+            SELECT DATE_TRUNC('hour', "createdAt") as date, COUNT(*)::integer as count
+            FROM "Consultation"
+            WHERE "createdAt" >= ${startDate}
+            GROUP BY DATE_TRUNC('hour', "createdAt")
+          `
+        ]);
+
+        const slots = [];
         for (let i = 5; i >= 0; i--) {
           const start = new Date(now.getTime() - (i + 1) * 4 * 60 * 60 * 1000);
           const end = new Date(now.getTime() - i * 4 * 60 * 60 * 1000);
           const label = start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-          
-          countPromises.push(
-            Promise.all([
-              prisma.patient.count({ where: { createdAt: { gte: start, lt: end } } }),
-              prisma.consultation.count({ where: { createdAt: { gte: start, lt: end } } })
-            ]).then(([regCount, consCount]) => ({
-              index: i,
-              name: label,
-              Registrations: regCount,
-              Consultations: consCount
-            }))
-          );
+
+          const regCount = patientGroups
+            .filter(p => {
+              const pTime = new Date(p.date).getTime();
+              return pTime >= start.getTime() && pTime < end.getTime();
+            })
+            .reduce((sum, p) => sum + Number(p.count), 0);
+
+          const consCount = consultationGroups
+            .filter(c => {
+              const cTime = new Date(c.date).getTime();
+              return cTime >= start.getTime() && cTime < end.getTime();
+            })
+            .reduce((sum, c) => sum + Number(c.count), 0);
+
+          slots.push({ name: label, Registrations: regCount, Consultations: consCount });
         }
+        slots.forEach(s => {
+          chartData.push(s);
+        });
       } else if (timeFilter === '7days') {
+        [patientGroups, consultationGroups] = await Promise.all([
+          prisma.$queryRaw<Array<{ date: Date; count: number }>>`
+            SELECT DATE_TRUNC('day', "createdAt")::date as date, COUNT(*)::integer as count
+            FROM "Patient"
+            WHERE "createdAt" >= ${startDate}
+            GROUP BY DATE_TRUNC('day', "createdAt")
+          `,
+          prisma.$queryRaw<Array<{ date: Date; count: number }>>`
+            SELECT DATE_TRUNC('day', "createdAt")::date as date, COUNT(*)::integer as count
+            FROM "Consultation"
+            WHERE "createdAt" >= ${startDate}
+            GROUP BY DATE_TRUNC('day', "createdAt")
+          `
+        ]);
+
+        const slots = [];
         for (let i = 6; i >= 0; i--) {
           const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
           const label = d.toLocaleDateString('en-US', { weekday: 'short' });
           const startOfLabelDay = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
           const endOfLabelDay = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
 
-          countPromises.push(
-            Promise.all([
-              prisma.patient.count({ where: { createdAt: { gte: startOfLabelDay, lte: endOfLabelDay } } }),
-              prisma.consultation.count({ where: { createdAt: { gte: startOfLabelDay, lte: endOfLabelDay } } })
-            ]).then(([regCount, consCount]) => ({
-              index: i,
-              name: label,
-              Registrations: regCount,
-              Consultations: consCount
-            }))
-          );
+          const regCount = patientGroups
+            .filter(p => {
+              const pTime = new Date(p.date).getTime();
+              return pTime >= startOfLabelDay.getTime() && pTime <= endOfLabelDay.getTime();
+            })
+            .reduce((sum, p) => sum + Number(p.count), 0);
+
+          const consCount = consultationGroups
+            .filter(c => {
+              const cTime = new Date(c.date).getTime();
+              return cTime >= startOfLabelDay.getTime() && cTime <= endOfLabelDay.getTime();
+            })
+            .reduce((sum, c) => sum + Number(c.count), 0);
+
+          slots.push({ name: label, Registrations: regCount, Consultations: consCount });
         }
+        slots.forEach(s => {
+          chartData.push(s);
+        });
       } else {
+        [patientGroups, consultationGroups] = await Promise.all([
+          prisma.$queryRaw<Array<{ date: Date; count: number }>>`
+            SELECT DATE_TRUNC('day', "createdAt")::date as date, COUNT(*)::integer as count
+            FROM "Patient"
+            WHERE "createdAt" >= ${startDate}
+            GROUP BY DATE_TRUNC('day', "createdAt")
+          `,
+          prisma.$queryRaw<Array<{ date: Date; count: number }>>`
+            SELECT DATE_TRUNC('day', "createdAt")::date as date, COUNT(*)::integer as count
+            FROM "Consultation"
+            WHERE "createdAt" >= ${startDate}
+            GROUP BY DATE_TRUNC('day', "createdAt")
+          `
+        ]);
+
+        const slots = [];
         for (let i = 5; i >= 0; i--) {
           const start = new Date(now.getTime() - (i + 1) * 5 * 24 * 60 * 60 * 1000);
           const end = new Date(now.getTime() - i * 5 * 24 * 60 * 60 * 1000);
           const label = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
-          countPromises.push(
-            Promise.all([
-              prisma.patient.count({ where: { createdAt: { gte: start, lt: end } } }),
-              prisma.consultation.count({ where: { createdAt: { gte: start, lt: end } } })
-            ]).then(([regCount, consCount]) => ({
-              index: i,
-              name: label,
-              Registrations: regCount,
-              Consultations: consCount
-            }))
-          );
-        }
-      }
+          const regCount = patientGroups
+            .filter(p => {
+              const pTime = new Date(p.date).getTime();
+              return pTime >= start.getTime() && pTime < end.getTime();
+            })
+            .reduce((sum, p) => sum + Number(p.count), 0);
 
-      const resolvedChartData = await Promise.all(countPromises);
-      resolvedChartData.sort((a, b) => b.index - a.index);
-      const chartData = resolvedChartData.map(({ name, Registrations, Consultations }) => ({
-        name,
-        Registrations,
-        Consultations
-      }));
+          const consCount = consultationGroups
+            .filter(c => {
+              const cTime = new Date(c.date).getTime();
+              return cTime >= start.getTime() && cTime < end.getTime();
+            })
+            .reduce((sum, c) => sum + Number(c.count), 0);
+
+          slots.push({ name: label, Registrations: regCount, Consultations: consCount });
+        }
+        slots.forEach(s => {
+          chartData.push(s);
+        });
+      }
 
       // Compute Unified System Logs Feed matching client layouts precisely with top 7 events
       const [pLogs, tLogs, cLogs, prLogs, bLogs] = await Promise.all([
@@ -2828,7 +2915,11 @@ async function startServer() {
       res.end();
     } catch (error) {
       console.error('Error exporting patients:', error);
-      res.status(500).json({ error: 'Failed to export patients' });
+      if (res.headersSent) {
+        res.end();
+      } else {
+        res.status(500).json({ error: 'Failed to export patients' });
+      }
     }
   });
 
@@ -3125,15 +3216,42 @@ async function startServer() {
       }
 
       const includeClause = { 
-        patient: true,
-        doctorQueue: true,
+        patient: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            age: true,
+            gender: true,
+            medicalHistory: true,
+            chronicConditions: true,
+            allergies: true,
+            createdAt: true
+          }
+        },
+        doctorQueue: {
+          select: {
+            id: true
+          }
+        },
         visitRecord: {
-          include: {
+          select: {
+            id: true,
             consultation: {
-              include: {
+              select: {
+                id: true,
                 prescription: {
-                  include: {
-                    items: true
+                  select: {
+                    id: true,
+                    items: {
+                      select: {
+                        id: true,
+                        medicine: true,
+                        dosage: true,
+                        frequency: true,
+                        duration: true
+                      }
+                    }
                   }
                 }
               }
@@ -3279,7 +3397,7 @@ async function startServer() {
         by: ['doctorId'],
         where: {
           ...whereClause,
-          doctorId: { not: null }
+          doctorId: { not: '' }
         }
       });
       const assignedDoctorsCount = doctorsGroup.length;
@@ -3343,7 +3461,11 @@ async function startServer() {
       res.end();
     } catch (error) {
       console.error('Failed to export tokens:', error);
-      res.status(500).json({ error: 'Failed to export tokens' });
+      if (res.headersSent) {
+        res.end();
+      } else {
+        res.status(500).json({ error: 'Failed to export tokens' });
+      }
     }
   });
 
@@ -3680,9 +3802,9 @@ async function startServer() {
         const doctorId = (req as any).user?.userId;
 
         const [hasConsultation, hasAppointment, hasToken] = await Promise.all([
-          prisma.consultation.findFirst({ where: { patientId, doctorId } }),
-          prisma.appointment.findFirst({ where: { patientId, doctorId } }),
-          prisma.token.findFirst({ where: { patientId, doctorId } })
+          prisma.consultation.findFirst({ where: { patientId, doctorId }, select: { id: true } }),
+          prisma.appointment.findFirst({ where: { patientId, doctorId }, select: { id: true } }),
+          prisma.token.findFirst({ where: { patientId, doctorId }, select: { id: true } })
         ]);
 
         if (!hasConsultation && !hasAppointment && !hasToken) {
@@ -3852,7 +3974,20 @@ async function startServer() {
             include: {
               patient: true,
               doctor: { select: { name: true, department: true } },
-              consultation: { include: { visitRecord: { include: { token: true } } } },
+              consultation: {
+                select: {
+                  visitRecord: {
+                    select: {
+                      token: {
+                        select: {
+                          tokenNumber: true,
+                          priority: true
+                        }
+                      }
+                    }
+                  }
+                }
+              },
               items: true
             }
           }
@@ -3892,7 +4027,20 @@ async function startServer() {
               include: {
                 patient: true,
                 doctor: { select: { name: true, department: true } },
-                consultation: { include: { visitRecord: { include: { token: true } } } },
+                consultation: {
+                  select: {
+                    visitRecord: {
+                      select: {
+                        token: {
+                          select: {
+                            tokenNumber: true,
+                            priority: true
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
                 items: true
               }
             }
@@ -4142,15 +4290,48 @@ async function startServer() {
       }
 
       const includeClause = {
-        patient: true,
-        items: true,
+        patient: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        items: {
+          select: {
+            id: true,
+            billId: true,
+            name: true,
+            quantity: true,
+            unitPrice: true,
+            total: true
+          }
+        },
         dispensingLog: {
-          include: {
+          select: {
+            id: true,
+            pharmacyQueueId: true,
+            dispensedAt: true,
+            pharmacistId: true,
             pharmacyQueue: {
-              include: {
+              select: {
+                id: true,
+                prescriptionId: true,
+                status: true,
+                createdAt: true,
                 prescription: {
-                  include: {
-                    doctor: true
+                  select: {
+                    id: true,
+                    patientId: true,
+                    doctorId: true,
+                    consultationId: true,
+                    status: true,
+                    createdAt: true,
+                    doctor: {
+                      select: {
+                        name: true,
+                        department: true
+                      }
+                    }
                   }
                 }
               }
@@ -4195,15 +4376,48 @@ async function startServer() {
   app.get('/api/export/bills', authenticateJWT, requireRole(['PHARMACY', 'ADMIN', 'DOCTOR', 'RECEPTION']), async (req: any, res: any) => {
     try {
       const includeClause = {
-        patient: true,
-        items: true,
+        patient: {
+          select: {
+            id: true,
+            name: true
+          }
+        },
+        items: {
+          select: {
+            id: true,
+            billId: true,
+            name: true,
+            quantity: true,
+            unitPrice: true,
+            total: true
+          }
+        },
         dispensingLog: {
-          include: {
+          select: {
+            id: true,
+            pharmacyQueueId: true,
+            dispensedAt: true,
+            pharmacistId: true,
             pharmacyQueue: {
-              include: {
+              select: {
+                id: true,
+                prescriptionId: true,
+                status: true,
+                createdAt: true,
                 prescription: {
-                  include: {
-                    doctor: true
+                  select: {
+                    id: true,
+                    patientId: true,
+                    doctorId: true,
+                    consultationId: true,
+                    status: true,
+                    createdAt: true,
+                    doctor: {
+                      select: {
+                        name: true,
+                        department: true
+                      }
+                    }
                   }
                 }
               }
@@ -4255,7 +4469,11 @@ async function startServer() {
       res.end();
     } catch (error) {
       console.error('Failed to export bills:', error);
-      res.status(500).json({ error: 'Failed to export bills' });
+      if (res.headersSent) {
+        res.end();
+      } else {
+        res.status(500).json({ error: 'Failed to export bills' });
+      }
     }
   });
 
@@ -4452,42 +4670,68 @@ async function startServer() {
         });
       }
 
-      const allActiveBatches = await prisma.inventoryItem.findMany({
-        where: {
-          status: 'ACTIVE',
-          stockQuantity: { gt: 0 }
-        }
-      });
-
+      const itemNames = Array.from(new Set(items.map((item: any) => item.name).filter(Boolean)));
       const now = new Date();
+
+      const [activeNonExpiredGroup, expiredGroup] = itemNames.length > 0 ? await Promise.all([
+        prisma.inventoryItem.groupBy({
+          by: ['name'],
+          where: {
+            name: { in: itemNames },
+            status: 'ACTIVE',
+            stockQuantity: { gt: 0 },
+            OR: [
+              { expiryDate: null },
+              { expiryDate: { gte: now } }
+            ]
+          },
+          _sum: {
+            stockQuantity: true
+          },
+          _count: {
+            id: true
+          },
+          _min: {
+            expiryDate: true
+          }
+        }),
+        prisma.inventoryItem.groupBy({
+          by: ['name'],
+          where: {
+            name: { in: itemNames },
+            status: 'ACTIVE',
+            stockQuantity: { gt: 0 },
+            expiryDate: { lt: now }
+          },
+          _count: {
+            id: true
+          }
+        })
+      ]) : [[], []];
+
       const totalStockMap = new Map<string, number>();
       const activeBatchCountMap = new Map<string, number>();
       const nextExpiryDatesMap = new Map<string, Date>();
       const hasExpiredMap = new Map<string, boolean>();
 
-      for (const batch of allActiveBatches) {
-        if (!batch.name) continue;
-        const key = batch.name.toLowerCase();
-
-        const isNotExpired = !batch.expiryDate || batch.expiryDate >= now;
-        const isExpired = batch.expiryDate && batch.expiryDate < now;
-
-        if (isNotExpired) {
-          totalStockMap.set(key, (totalStockMap.get(key) || 0) + batch.stockQuantity);
-          activeBatchCountMap.set(key, (activeBatchCountMap.get(key) || 0) + 1);
+      activeNonExpiredGroup.forEach((g: any) => {
+        if (!g.name) return;
+        const key = g.name.toLowerCase();
+        totalStockMap.set(key, g._sum.stockQuantity || 0);
+        activeBatchCountMap.set(key, g._count.id || 0);
+        if (g._min.expiryDate) {
+          nextExpiryDatesMap.set(key, g._min.expiryDate);
         }
+      });
 
-        if (batch.expiryDate && batch.expiryDate >= now) {
-          const currentNext = nextExpiryDatesMap.get(key);
-          if (!currentNext || batch.expiryDate < currentNext) {
-            nextExpiryDatesMap.set(key, batch.expiryDate);
-          }
-        }
-
-        if (isExpired) {
+      expiredGroup.forEach((g: any) => {
+        if (!g.name) return;
+        const key = g.name.toLowerCase();
+        const count = g._count.id || 0;
+        if (count > 0) {
           hasExpiredMap.set(key, true);
         }
-      }
+      });
 
       const enhancedItems = items.map((item) => {
         const key = (item.name || '').toLowerCase();
