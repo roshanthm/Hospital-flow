@@ -60,8 +60,9 @@ export default function RevenueReports() {
   }, []);
 
   useEffect(() => {
+    // Single request per mount/filter-change: decouple from bills to prevent double-fetching
     loadRevenueSummary();
-  }, [timeFilter, bills]);
+  }, [timeFilter]);
 
   const {
     totalRevenueFiltered,

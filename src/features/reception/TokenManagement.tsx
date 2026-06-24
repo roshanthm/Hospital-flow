@@ -75,10 +75,14 @@ export default function TokenManagement() {
   const fetchUsers = useStore(state => state.fetchUsers);
   const addPatient = useStore(state => state.addPatient);
 
+  const lastRefreshTimeRef = React.useRef(0);
+
   useEffect(() => {
     // Only preload tokens and users on mount. Avoid downloading the entire patient table.
     const syncData = () => {
-      if (document.visibilityState === 'visible') {
+      const now = Date.now();
+      if (document.visibilityState === 'visible' && now - lastRefreshTimeRef.current >= 2000) {
+        lastRefreshTimeRef.current = now;
         fetchTokens({ today: true });
         fetchUsers();
       }
@@ -96,8 +100,12 @@ export default function TokenManagement() {
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        fetchTokens({ today: true });
-        fetchUsers();
+        const now = Date.now();
+        if (now - lastRefreshTimeRef.current >= 2000) {
+          lastRefreshTimeRef.current = now;
+          fetchTokens({ today: true });
+          fetchUsers();
+        }
         clearInterval(intervalId);
         intervalId = setInterval(() => {
           if (document.visibilityState === 'visible') {
@@ -109,20 +117,11 @@ export default function TokenManagement() {
       }
     };
 
-    const handleFocus = () => {
-      if (document.visibilityState === 'visible') {
-        fetchTokens({ today: true });
-        fetchUsers();
-      }
-    };
-
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('focus', handleFocus);
 
     return () => {
       clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('focus', handleFocus);
     };
   }, []);
 

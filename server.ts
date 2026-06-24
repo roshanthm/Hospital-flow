@@ -541,7 +541,10 @@ async function startServer() {
 
       const timezoneOffsetHeader = req.headers['x-timezone-offset'];
       const timezoneOffsetMin = timezoneOffsetHeader ? parseInt(timezoneOffsetHeader as string, 10) : null;
-      await checkAndResetDoctorShifts(timezoneOffsetMin);
+      // Offload to background process to ensure rapid login response times
+      checkAndResetDoctorShifts(timezoneOffsetMin).catch(err => {
+        console.error('Error checking shifts on login:', err);
+      });
 
       let user;
       try {
@@ -1527,8 +1530,19 @@ async function startServer() {
     }
   });
 
+  // Operational Summary Cache
+  const operationalSummaryCache = new Map<string, { expiry: number; data: any }>();
+
   app.get('/api/admin/operational-summary', authenticateJWT, requireRole(['ADMIN']), async (req: any, res: any) => {
     const { timeFilter } = req.query;
+    const cacheKey = String(timeFilter || '30days');
+    const nowMs = Date.now();
+    const cached = operationalSummaryCache.get(cacheKey);
+
+    if (cached && nowMs < cached.expiry) {
+      return res.json(cached.data);
+    }
+
     try {
       const now = new Date();
       const whereClause: any = {};
@@ -1905,7 +1919,7 @@ async function startServer() {
         take: 10
       });
 
-      res.json({
+      const summaryData = {
         periodPatientsCount,
         patientProgressPercent,
         doctorsOnDutyCount,
@@ -1925,7 +1939,14 @@ async function startServer() {
         unifiedLogsList,
         emergencyRegistryItems,
         activeTransactions: activeBills
+      };
+
+      operationalSummaryCache.set(cacheKey, {
+        expiry: Date.now() + 60000,
+        data: summaryData
       });
+
+      res.json(summaryData);
     } catch (error: any) {
       console.error('Failed to calculate operational summary:', error);
       res.status(500).json({ error: 'Failed to calculate operational summary' });
@@ -4484,6 +4505,9 @@ async function startServer() {
 
     try {
       const result = await prisma.$transaction(async (tx) => {
+        // Implement row-level lock on the Bill record before status evaluation
+        await tx.$executeRaw`SELECT 1 FROM "Bill" WHERE id = ${billId} FOR UPDATE`;
+
         // 1. Fetch current bill with its items
         const currentBill = await tx.bill.findUnique({
           where: { id: billId },
@@ -4628,7 +4652,7 @@ async function startServer() {
     try {
       const { page, limit, search } = req.query;
       const pageNum = page ? parseInt(String(page), 10) : null;
-      const limitNum = limit ? parseInt(String(limit), 10) : null;
+      const limitNum = limit ? parseInt(String(limit), 10) : 50; // target limit = 50
       const searchStr = search ? String(search).trim() : '';
 
       const whereClause: any = {
@@ -4666,7 +4690,7 @@ async function startServer() {
           where: whereClause,
           include: { supplier: true },
           orderBy: { name: 'asc' },
-          take: 2000
+          take: 50 // safe default bounded size to protect from unbounded payloads
         });
       }
 

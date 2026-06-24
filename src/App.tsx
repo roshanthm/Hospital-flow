@@ -26,7 +26,14 @@ import DoctorMedicalHistory from './features/doctor/DoctorMedicalHistory';
 
 import PharmacyDashboard from './features/pharmacy/PharmacyDashboard';
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      refetchOnWindowFocus: false, // Prevent redundant/duplicate api runs on tab/window focus
+      retry: 1, // Safe retry boundary
+    },
+  },
+});
 
 export default function App() {
   return (

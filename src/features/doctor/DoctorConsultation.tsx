@@ -120,7 +120,7 @@ export default function DoctorConsultation() {
 
   // 1. Fetch token/patient details
   const { data: tokens, isLoading: isLoadingTokens } = useQuery({
-    queryKey: ['doctorTokens'],
+    queryKey: ['doctorTokens', 'allTokens'],
     queryFn: async () => {
       const res = await authFetch('/api/tokens');
       if (!res.ok) throw new Error('Failed to fetch token');

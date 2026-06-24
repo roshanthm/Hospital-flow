@@ -29,8 +29,24 @@ const basePrisma = new PrismaClient({
 
 const extendedPrisma = basePrisma.$extends({
   query: {
-    $allOperations({ model, operation, args, query }) {
-      return withDbRetry(() => query(args));
+    async $allOperations({ model, operation, args, query }) {
+      const start = Date.now();
+      try {
+        const result = await withDbRetry(() => query(args));
+        const duration = Date.now() - start;
+        if (duration > 250) { // Slow transaction / query threshold: 250ms
+          const total = pool.totalCount;
+          const idle = pool.idleCount;
+          const active = total - idle;
+          const waiting = pool.waitingCount;
+          console.warn(`[TELEMETRY] SLOW QUERY: ${model || 'Raw'}.${operation} took ${duration}ms | Pool: total=${total}, active=${active}, idle=${idle}, waiting=${waiting}`);
+        }
+        return result;
+      } catch (err: any) {
+        const duration = Date.now() - start;
+        console.error(`[TELEMETRY] QUERY ERROR: ${model || 'Raw'}.${operation} failed after ${duration}ms:`, err);
+        throw err;
+      }
     },
   },
 });

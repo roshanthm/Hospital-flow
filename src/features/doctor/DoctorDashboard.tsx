@@ -76,7 +76,7 @@ export default function DoctorDashboard() {
   }, []);
 
   const { data: tokens = [], isLoading } = useQuery({
-    queryKey: ['doctorTokens'],
+    queryKey: ['doctorTokens', 'activeQueue'],
     queryFn: async () => {
       const res = await authFetch('/api/tokens?status=WAITING,CALLED,IN_CONSULTATION');
       if (!res.ok) throw new Error('Failed to fetch tokens');

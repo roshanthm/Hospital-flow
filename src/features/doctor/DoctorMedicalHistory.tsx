@@ -78,7 +78,7 @@ export default function DoctorMedicalHistory() {
   });
 
   const { data: tokens = [], isLoading: isLoadingTokens } = useQuery({
-    queryKey: ['doctorTokens'],
+    queryKey: ['doctorTokens', 'todayTokens'],
     queryFn: async () => {
       const res = await authFetch('/api/tokens?today=true');
       if (!res.ok) throw new Error('Failed to fetch tokens');

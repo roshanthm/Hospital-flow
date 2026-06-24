@@ -260,6 +260,8 @@ model PharmacyQueue {
 
   prescription Prescription @relation(fields: [prescriptionId], references: [id])
   dispensingLog PharmacyDispensingLog?
+
+  @@index([status, createdAt])
 }
 
 model PharmacyDispensingLog {
