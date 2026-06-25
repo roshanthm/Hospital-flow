@@ -50,15 +50,42 @@ export default function UserManagement() {
   const [userToEdit, setUserToEdit] = useState<any | null>(null);
   const [userToDelete, setUserToDelete] = useState<any | null>(null);
   const [selectedStaffProfile, setSelectedStaffProfile] = useState<any | null>(null);
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState(() => {
+    return sessionStorage.getItem('users_searchTerm') || '';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('users_searchTerm', searchTerm);
+  }, [searchTerm]);
   
   // Custom filter states
-  const [filterRole, setFilterRole] = useState('ALL');
-  const [filterDept, setFilterDept] = useState('ALL');
-  const [filterStatus, setFilterStatus] = useState('ALL'); // ALL, ACTIVE, INACTIVE, ON_DUTY
+  const [filterRole, setFilterRole] = useState(() => {
+    return sessionStorage.getItem('users_filterRole') || 'ALL';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('users_filterRole', filterRole);
+  }, [filterRole]);
+
+  const [filterDept, setFilterDept] = useState(() => {
+    return sessionStorage.getItem('users_filterDept') || 'ALL';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('users_filterDept', filterDept);
+  }, [filterDept]);
+
+  const [filterStatus, setFilterStatus] = useState(() => {
+    return sessionStorage.getItem('users_filterStatus') || 'ALL';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('users_filterStatus', filterStatus);
+  }, [filterStatus]);
 
   // Navigation tab for focused Directories
-  const [activeTab, setActiveTab] = useState<'ALL' | 'DOCTOR' | 'PHARMACY' | 'RECEPTION' | 'STAFF' | 'RESETS'>('ALL');
+  const [activeTab, setActiveTab] = useState<'ALL' | 'DOCTOR' | 'PHARMACY' | 'RECEPTION' | 'STAFF' | 'RESETS'>(() => {
+    return (sessionStorage.getItem('users_activeTab') as any) || 'ALL';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('users_activeTab', activeTab);
+  }, [activeTab]);
 
   const [resetRequests, setResetRequests] = useState<any[]>([]);
   const [isResetRequestsLoading, setIsResetRequestsLoading] = useState(false);

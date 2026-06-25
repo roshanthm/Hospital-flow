@@ -114,6 +114,7 @@ model Token {
   @@index([patientId])
   @@index([doctorId])
   @@index([status, createdAt])
+  @@index([createdAt])
 }
 
 model DoctorQueue {
@@ -215,6 +216,7 @@ model Consultation {
   @@index([patientId])
   @@index([doctorId])
   @@index([patientId, createdAt])
+  @@index([createdAt])
 }
 
 model Prescription {
@@ -233,6 +235,7 @@ model Prescription {
 
   @@index([patientId])
   @@index([doctorId])
+  @@index([createdAt])
 }
 
 model PrescriptionItem {
@@ -292,6 +295,7 @@ model Bill {
 
   @@index([patientId])
   @@index([status, createdAt])
+  @@index([createdAt])
 }
 
 model BillItem {
@@ -318,6 +322,7 @@ model ActivityLog {
   user       User?    @relation(fields: [userId], references: [id])
 
   @@index([userId])
+  @@index([timestamp])
 }
 
 model InventoryItem {

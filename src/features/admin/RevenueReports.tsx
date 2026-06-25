@@ -11,7 +11,7 @@ import {
   Tooltip, ResponsiveContainer
 } from 'recharts';
 import { toast } from 'sonner';
-import { useStore, authFetch } from '@/src/store/useStore';
+import { useStore, authFetch, getClientCachedJSON } from '@/src/store/useStore';
 import { generateBillPDF } from '../../lib/pdfUtils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -22,33 +22,60 @@ export default function RevenueReports() {
   const departments = useStore(state => state.departments);
   const fetchDepartments = useStore(state => state.fetchDepartments);
   const [selectedDept, setSelectedDept] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'All' | 'Completed' | 'Processing'>('All');
-  const [timeFilter, setTimeFilter] = useState<'all' | '30days'>('all');
 
-  const [revenueSummary, setRevenueSummary] = useState<any>({
-    totalRevenueFiltered: 0,
-    outstandingInvoicesFiltered: 0,
-    settledBillsCountFiltered: 0,
-    settlementRate: '0.0%',
-    dynamicGrowth: '0.0%',
-    trendChartData: [],
-    calculatedDeptData: []
+  const [searchQuery, setSearchQuery] = useState(() => {
+    return sessionStorage.getItem('revenue_searchQuery') || '';
   });
-  const [isSummaryLoading, setIsSummaryLoading] = useState(true);
+  useEffect(() => {
+    sessionStorage.setItem('revenue_searchQuery', searchQuery);
+  }, [searchQuery]);
 
-  const loadRevenueSummary = async () => {
-    setIsSummaryLoading(true);
+  const [activeTab, setActiveTab] = useState<'All' | 'Completed' | 'Processing'>(() => {
+    return (sessionStorage.getItem('revenue_activeTab') as any) || 'All';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('revenue_activeTab', activeTab);
+  }, [activeTab]);
+
+  const [timeFilter, setTimeFilter] = useState<'all' | '30days'>(() => {
+    return (sessionStorage.getItem('revenue_timeFilter') as any) || 'all';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('revenue_timeFilter', timeFilter);
+  }, [timeFilter]);
+
+  const [revenueSummary, setRevenueSummary] = useState<any>(() => {
+    const cached = getClientCachedJSON(`/api/admin/revenue-summary?timeFilter=${timeFilter}`);
+    return cached || {
+      totalRevenueFiltered: 0,
+      outstandingInvoicesFiltered: 0,
+      settledBillsCountFiltered: 0,
+      settlementRate: '0.0%',
+      dynamicGrowth: '0.0%',
+      trendChartData: [],
+      calculatedDeptData: []
+    };
+  });
+
+  const [isSummaryLoading, setIsSummaryLoading] = useState(() => {
+    return !getClientCachedJSON(`/api/admin/revenue-summary?timeFilter=${timeFilter}`);
+  });
+
+  const loadRevenueSummary = async (silent = false) => {
+    if (!silent) setIsSummaryLoading(true);
     try {
       const res = await authFetch(`/api/admin/revenue-summary?timeFilter=${timeFilter}`);
       if (res.ok) {
         const data = await res.json();
-        setRevenueSummary(data);
+        setRevenueSummary((prev: any) => {
+          if (JSON.stringify(prev) === JSON.stringify(data)) return prev;
+          return data;
+        });
       }
     } catch (err) {
       console.error('Failed to load revenue report metrics:', err);
     } finally {
-      setIsSummaryLoading(false);
+      if (!silent) setIsSummaryLoading(false);
     }
   };
 
@@ -61,7 +88,20 @@ export default function RevenueReports() {
 
   useEffect(() => {
     // Single request per mount/filter-change: decouple from bills to prevent double-fetching
-    loadRevenueSummary();
+    const hasCache = !!getClientCachedJSON(`/api/admin/revenue-summary?timeFilter=${timeFilter}`);
+    loadRevenueSummary(hasCache);
+  }, [timeFilter]);
+
+  // Hook up real-time SSE cache invalidation to trigger silent background refreshes
+  useEffect(() => {
+    const handleInvalidation = (e: any) => {
+      const keys = e.detail?.keys || [];
+      if (keys.some((k: string) => k.includes('/api/admin/revenue-summary'))) {
+        loadRevenueSummary(true);
+      }
+    };
+    window.addEventListener('medflow:cache-invalidated', handleInvalidation);
+    return () => window.removeEventListener('medflow:cache-invalidated', handleInvalidation);
   }, [timeFilter]);
 
   const {

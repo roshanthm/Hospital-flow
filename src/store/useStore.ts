@@ -127,95 +127,416 @@ const refreshAccessToken = async (): Promise<string | null> => {
   return null;
 };
 
-export const authFetch = async (url: string, options: RequestInit = {}): Promise<Response> => {
-  let state = useStore.getState();
+// Memory cache for client GET requests to enable instant navigation and deduplication
+interface ClientCacheEntry {
+  timestamp: number;
+  dataText: string;
+  contentType: string;
+  status: number;
+  statusText: string;
+  headers: [string, string][];
+  version: number;
+  category: string;
+}
 
-  // If a refresh is already in progress, wait for it first to use the new token immediately
-  if (isRefreshing) {
-    await isRefreshing;
-    state = useStore.getState();
-  }
+const clientCache = new Map<string, ClientCacheEntry>();
+const pendingRequests = new Map<string, Promise<Response>>();
 
-  let token = state.currentUser?.accessToken;
+export let localCacheVersions: Record<string, number> = {
+  system: 1,
+  users: 1,
+  revenue: 1,
+  attendance: 1,
+  inventory: 1,
+  patients: 1,
+  tokens: 1,
+};
 
-  const headers: Record<string, string> = {
-    'X-Timezone-Offset': String(new Date().getTimezoneOffset()),
-    ...options.headers as Record<string, string>,
+export const getRouteVersionCategory = (url: string): string => {
+  const urlLower = url.toLowerCase();
+  if (urlLower.includes('/api/admin/operational-summary')) return 'system';
+  if (urlLower.includes('/api/admin/revenue-summary')) return 'revenue';
+  if (urlLower.includes('/api/admin/doctor-attendance')) return 'attendance';
+  if (urlLower.includes('/api/departments')) return 'system';
+  if (urlLower.includes('/api/users')) return 'users';
+  if (urlLower.includes('/api/bills')) return 'revenue';
+  if (urlLower.includes('/api/patients')) return 'patients';
+  if (urlLower.includes('/api/tokens')) return 'tokens';
+  if (urlLower.includes('/api/inventory')) return 'inventory';
+  return 'system';
+};
+
+const syncChannel = typeof window !== 'undefined' ? new BroadcastChannel('medflow-sync-channel') : null;
+
+export const getCacheKey = (url: string): string => {
+  const currentUser = useStore.getState().currentUser;
+  if (!currentUser) return url;
+  return `${currentUser.id}:${currentUser.role}:${url}`;
+};
+
+export const clearClientCache = () => {
+  clientCache.clear();
+  pendingRequests.clear();
+  localCacheVersions = {
+    system: 1,
+    users: 1,
+    revenue: 1,
+    attendance: 1,
+    inventory: 1,
+    patients: 1,
+    tokens: 1,
   };
+};
 
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+export const invalidateClientCache = (keys: string[], localOnly = false) => {
+  for (const cacheKey of clientCache.keys()) {
+    const parts = cacheKey.split(':');
+    const urlPart = parts.slice(2).join(':') || cacheKey;
+    for (const key of keys) {
+      if (urlPart.includes(key)) {
+        clientCache.delete(cacheKey);
+      }
+    }
   }
+  if (!localOnly && syncChannel) {
+    syncChannel.postMessage({ type: 'INVALIDATE', keys });
+  }
+};
 
-  const fetchOptions: RequestInit = {
-    ...options,
-    headers,
-    credentials: 'include'
+if (syncChannel) {
+  syncChannel.onmessage = (event) => {
+    if (event.data && event.data.type === 'INVALIDATE') {
+      invalidateClientCache(event.data.keys, true);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('medflow:cache-invalidated', { detail: { keys: event.data.keys } }));
+      }
+    } else if (event.data && event.data.type === 'VERSION_UPDATE') {
+      localCacheVersions = { ...localCacheVersions, ...event.data.versions };
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('medflow:versions-updated', { detail: { versions: event.data.versions } }));
+      }
+    }
   };
+}
 
-  let res: Response;
-  try {
-    res = await fetch(url, fetchOptions);
-  } catch (err) {
-    console.warn('Network fetch error for:', url, err);
-    return new Response(JSON.stringify({ error: 'Clinical API is currently unreachable. Please check connection and retry.' }), {
-      status: 503,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  if (res.status === 401 && state.currentUser) {
-    // Audit current token value - if already updated by an concurrent request, retry immediately
-    const latestToken = useStore.getState().currentUser?.accessToken;
-    if (latestToken && latestToken !== token) {
-      const retryHeaders = {
-        ...options.headers as Record<string, string>,
-        'Authorization': `Bearer ${latestToken}`
-      };
+// Establish Server-Sent Events (SSE) connection for real-time synchronization across users
+if (typeof window !== 'undefined') {
+  const connectSSE = () => {
+    const eventSource = new EventSource('/api/sync/events');
+    
+    eventSource.onmessage = (event) => {
       try {
-        return await fetch(url, {
-          ...fetchOptions,
-          headers: retryHeaders
-        });
-      } catch (retryErr) {
-        console.warn('Network fetch retry error for refreshed token:', url, retryErr);
-        return new Response(JSON.stringify({ error: 'Clinical API is unreachable on session retry.' }), {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' }
+        const data = JSON.parse(event.data);
+        if (data.type === 'mutation') {
+          const category = data.category;
+          const keysToInvalidate: string[] = [];
+          
+          if (category === 'patient') {
+            keysToInvalidate.push('/api/patients', '/api/admin/operational-summary');
+          } else if (category === 'token') {
+            keysToInvalidate.push('/api/tokens', '/api/admin/operational-summary', '/api/admin/doctor-attendance', '/api/patients/history');
+          } else if (category === 'consultation') {
+            keysToInvalidate.push('/api/tokens', '/api/admin/operational-summary', '/api/admin/doctor-attendance', '/api/patients/history', '/api/bills');
+          } else if (category === 'bill') {
+            keysToInvalidate.push('/api/bills', '/api/admin/revenue-summary', '/api/admin/operational-summary', '/api/pharmacy/dashboard-summary');
+          } else if (category === 'dispense') {
+            keysToInvalidate.push('/api/bills', '/api/admin/revenue-summary', '/api/admin/operational-summary', '/api/pharmacy/dashboard-summary', '/api/inventory');
+          } else if (category === 'inventory') {
+            keysToInvalidate.push('/api/inventory', '/api/pharmacy/dashboard-summary', '/api/admin/operational-summary');
+          } else if (category === 'admin') {
+            keysToInvalidate.push('/api/users', '/api/admin/operational-summary', '/api/admin/doctor-attendance', '/api/departments');
+          } else {
+            keysToInvalidate.push('/api/admin/operational-summary', '/api/admin/revenue-summary');
+          }
+          
+          if (data.versions) {
+            localCacheVersions = { ...localCacheVersions, ...data.versions };
+            if (syncChannel) {
+              syncChannel.postMessage({ type: 'VERSION_UPDATE', versions: data.versions });
+            }
+          }
+          
+          invalidateClientCache(keysToInvalidate, true);
+          window.dispatchEvent(new CustomEvent('medflow:cache-invalidated', { detail: { keys: keysToInvalidate } }));
+        }
+      } catch (e) {
+        console.error('Error handling SSE message:', e);
+      }
+    };
+    
+    eventSource.onerror = () => {
+      eventSource.close();
+      setTimeout(connectSSE, 5000);
+    };
+  };
+  
+  connectSSE();
+  
+  fetch('/api/sync/versions')
+    .then(r => r.json())
+    .then(versions => {
+      localCacheVersions = { ...localCacheVersions, ...versions };
+    })
+    .catch(err => console.warn('Failed to fetch initial sync versions:', err));
+}
+
+export const getClientCachedJSON = (url: string, allowStale = true): any | null => {
+  const cacheKey = getCacheKey(url);
+  const cached = clientCache.get(cacheKey);
+  if (cached) {
+    if (allowStale) {
+      try {
+        return JSON.parse(cached.dataText);
+      } catch (e) {
+        return null;
+      }
+    }
+    
+    const category = getRouteVersionCategory(url);
+    const currentVersion = localCacheVersions[category] || 1;
+    if (cached.version !== currentVersion) {
+      return null;
+    }
+
+    const cacheTTLs: Record<string, number> = {
+      '/api/admin/operational-summary': 5 * 60 * 1000,
+      '/api/admin/revenue-summary': 5 * 60 * 1000,
+      '/api/admin/doctor-attendance': 5 * 60 * 1000,
+      '/api/departments': 5 * 60 * 1000,
+      '/api/users': 60 * 1000,
+      '/api/bills': 60 * 1000,
+    };
+    let ttl = 0;
+    for (const [route, t] of Object.entries(cacheTTLs)) {
+      if (url.startsWith(route)) {
+        ttl = t;
+        break;
+      }
+    }
+    if (ttl > 0 && Date.now() - cached.timestamp < ttl) {
+      try {
+        return JSON.parse(cached.dataText);
+      } catch (e) {
+        return null;
+      }
+    }
+  }
+  return null;
+};
+
+export const authFetch = async (url: string, options: RequestInit = {}): Promise<Response> => {
+  const method = (options.method || 'GET').toUpperCase();
+
+  const cacheTTLs: Record<string, number> = {
+    '/api/admin/operational-summary': 5 * 60 * 1000,
+    '/api/admin/revenue-summary': 5 * 60 * 1000,
+    '/api/admin/doctor-attendance': 5 * 60 * 1000,
+    '/api/departments': 5 * 60 * 1000,
+    '/api/users': 60 * 1000,
+    '/api/bills': 60 * 1000,
+  };
+
+  let cacheTTL = 0;
+  if (method === 'GET') {
+    for (const [route, ttl] of Object.entries(cacheTTLs)) {
+      if (url.startsWith(route)) {
+        cacheTTL = ttl;
+        break;
+      }
+    }
+  }
+
+  if (cacheTTL > 0) {
+    const cacheKey = getCacheKey(url);
+    const cached = clientCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < cacheTTL) {
+      const category = getRouteVersionCategory(url);
+      const currentVersion = localCacheVersions[category] || 1;
+      if (cached.version === currentVersion) {
+        return new Response(cached.dataText, {
+          status: cached.status,
+          statusText: cached.statusText,
+          headers: new Headers(cached.headers),
         });
       }
     }
+  }
 
-    // Trigger single unified token refresh
-    if (!isRefreshing) {
-      isRefreshing = refreshAccessToken().finally(() => {
-        isRefreshing = null;
+  // Deduplicate concurrent in-flight requests for the exact same URL
+  if (method === 'GET') {
+    const pending = pendingRequests.get(url);
+    if (pending) {
+      const res = await pending;
+      return res.clone();
+    }
+  }
+
+  const executeFetch = async (): Promise<Response> => {
+    let state = useStore.getState();
+
+    // If a refresh is already in progress, wait for it first to use the new token immediately
+    if (isRefreshing) {
+      await isRefreshing;
+      state = useStore.getState();
+    }
+
+    let token = state.currentUser?.accessToken;
+
+    const headers: Record<string, string> = {
+      'X-Timezone-Offset': String(new Date().getTimezoneOffset()),
+      ...options.headers as Record<string, string>,
+    };
+
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const fetchOptions: RequestInit = {
+      ...options,
+      headers,
+      credentials: 'include'
+    };
+
+    let res: Response;
+    try {
+      res = await fetch(url, fetchOptions);
+    } catch (err) {
+      console.warn('Network fetch error for:', url, err);
+      return new Response(JSON.stringify({ error: 'Clinical API is currently unreachable. Please check connection and retry.' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    const newAccessToken = await isRefreshing;
+    if (res.status === 401 && state.currentUser) {
+      // Audit current token value - if already updated by an concurrent request, retry immediately
+      const latestToken = useStore.getState().currentUser?.accessToken;
+      if (latestToken && latestToken !== token) {
+        const retryHeaders = {
+          ...options.headers as Record<string, string>,
+          'Authorization': `Bearer ${latestToken}`
+        };
+        try {
+          return await fetch(url, {
+            ...fetchOptions,
+            headers: retryHeaders
+          });
+        } catch (retryErr) {
+          console.warn('Network fetch retry error for refreshed token:', url, retryErr);
+          return new Response(JSON.stringify({ error: 'Clinical API is unreachable on session retry.' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
 
-    if (newAccessToken) {
-      const retryHeaders = {
-        ...options.headers as Record<string, string>,
-        'Authorization': `Bearer ${newAccessToken}`
-      };
-      try {
-        return await fetch(url, {
-          ...fetchOptions,
-          headers: retryHeaders
-        });
-      } catch (retryErr) {
-        console.warn('Network fetch retry error for:', url, retryErr);
-        return new Response(JSON.stringify({ error: 'Clinical API is unreachable on session retry.' }), {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' }
+      // Trigger single unified token refresh
+      if (!isRefreshing) {
+        isRefreshing = refreshAccessToken().finally(() => {
+          isRefreshing = null;
         });
       }
-    }
-  }
 
-  return res;
+      const newAccessToken = await isRefreshing;
+
+      if (newAccessToken) {
+        const retryHeaders = {
+          ...options.headers as Record<string, string>,
+          'Authorization': `Bearer ${newAccessToken}`
+        };
+        try {
+          return await fetch(url, {
+            ...fetchOptions,
+            headers: retryHeaders
+          });
+        } catch (retryErr) {
+          console.warn('Network fetch retry error for:', url, retryErr);
+          return new Response(JSON.stringify({ error: 'Clinical API is unreachable on session retry.' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+    }
+
+    return res;
+  };
+
+  if (method === 'GET') {
+    const fetchPromise = executeFetch();
+    pendingRequests.set(url, fetchPromise);
+
+    try {
+      const originalRes = await fetchPromise;
+      pendingRequests.delete(url);
+
+      if (originalRes.ok && cacheTTL > 0) {
+        const clonedRes = originalRes.clone();
+        const dataText = await clonedRes.text();
+        const headersList: [string, string][] = [];
+        originalRes.headers.forEach((val, key) => {
+          headersList.push([key, val]);
+        });
+
+        const cacheKey = getCacheKey(url);
+        const category = getRouteVersionCategory(url);
+        const version = localCacheVersions[category] || 1;
+        clientCache.set(cacheKey, {
+          timestamp: Date.now(),
+          dataText,
+          contentType: originalRes.headers.get('content-type') || 'application/json',
+          status: originalRes.status,
+          statusText: originalRes.statusText,
+          headers: headersList,
+          version,
+          category,
+        });
+
+        return new Response(dataText, {
+          status: originalRes.status,
+          statusText: originalRes.statusText,
+          headers: originalRes.headers,
+        });
+      }
+
+      return originalRes;
+    } catch (e) {
+      pendingRequests.delete(url);
+      throw e;
+    }
+  } else {
+    // Non-GET mutation request
+    const res = await executeFetch();
+
+    // Event-driven invalidation after a successful mutation
+    if (res.ok) {
+      const urlLower = url.toLowerCase();
+      const keysToInvalidate: string[] = [];
+
+      if (urlLower.includes('/api/patients')) {
+        keysToInvalidate.push('/api/patients', '/api/admin/operational-summary');
+      } else if (urlLower.includes('/api/tokens')) {
+        keysToInvalidate.push('/api/tokens', '/api/admin/operational-summary', '/api/admin/doctor-attendance', '/api/patients/history');
+      } else if (urlLower.includes('/api/consultations')) {
+        keysToInvalidate.push('/api/tokens', '/api/admin/operational-summary', '/api/admin/doctor-attendance', '/api/patients/history', '/api/bills');
+      } else if (urlLower.includes('/api/bills')) {
+        keysToInvalidate.push('/api/bills', '/api/admin/revenue-summary', '/api/admin/operational-summary', '/api/pharmacy/dashboard-summary');
+      } else if (urlLower.includes('/api/pharmacy/dispense')) {
+        keysToInvalidate.push('/api/bills', '/api/admin/revenue-summary', '/api/admin/operational-summary', '/api/pharmacy/dashboard-summary', '/api/inventory');
+      } else if (urlLower.includes('/api/inventory')) {
+        keysToInvalidate.push('/api/inventory', '/api/pharmacy/dashboard-summary', '/api/admin/operational-summary');
+      } else if (urlLower.includes('/api/users') || urlLower.includes('/api/departments') || urlLower.includes('/admin/reset') || urlLower.includes('password')) {
+        keysToInvalidate.push('/api/users', '/api/admin/operational-summary', '/api/admin/doctor-attendance', '/api/departments');
+      } else {
+        // Safe default: invalidate operational & revenue summaries
+        keysToInvalidate.push('/api/admin/operational-summary', '/api/admin/revenue-summary');
+      }
+
+      invalidateClientCache(keysToInvalidate);
+    }
+
+    return res;
+  }
 };
 
 export const useStore = create<HospitalState>()(
@@ -274,6 +595,7 @@ export const useStore = create<HospitalState>()(
         } catch (e) {
           console.error(e);
         }
+        clearClientCache();
         set({ currentUser: null });
       },
       

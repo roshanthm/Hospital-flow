@@ -47,6 +47,9 @@ function setCachedData(key: string, data: any, ttlMs: number = 10 * 60 * 1000): 
 
 function invalidateCachedData(key: string): void {
   serverCacheMap.delete(key);
+  if (key === 'users_list_all') {
+    serverCacheMap.delete('doctors_lookup');
+  }
 }
 
 // --- DOCTOR DUTY SHIFT CONFIGS & MANAGEMENT HELPERS ---
@@ -359,6 +362,14 @@ async function checkAndResetDoctorShifts(timezoneOffsetMin?: number | null) {
     console.error("Error running checkAndResetDoctorShifts:", error);
   }
 }
+
+// Start background interval for doctor shift reset (runs every 30 seconds, non-blocking)
+setInterval(() => {
+  checkAndResetDoctorShifts().catch(err => {
+    console.error("Error in background checkAndResetDoctorShifts:", err);
+  });
+}, 30000);
+
 // -----------------------------------------------------
 
 import crypto from 'crypto';
@@ -473,6 +484,29 @@ function rateLimiter(options: { windowMs: number; max: number; message: string }
   };
 }
 
+const sseClients = new Set<any>();
+
+const cacheVersions: Record<string, number> = {
+  system: 1,
+  users: 1,
+  revenue: 1,
+  attendance: 1,
+  inventory: 1,
+  patients: 1,
+  tokens: 1,
+};
+
+function broadcastSseEvent(eventData: any) {
+  const dataString = `data: ${JSON.stringify(eventData)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(dataString);
+    } catch (err) {
+      sseClients.delete(client);
+    }
+  }
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
@@ -506,6 +540,103 @@ async function startServer() {
       };
     }
     next();
+  });
+
+  // Real-Time SSE Mutation & Synchronization Interceptor Middleware
+  app.use((req, res, next) => {
+    res.on('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        const method = req.method.toUpperCase();
+        if (method !== 'GET') {
+          const urlLower = req.originalUrl.toLowerCase();
+          let category = 'other';
+          if (urlLower.includes('/api/patients')) {
+            category = 'patient';
+          } else if (urlLower.includes('/api/tokens')) {
+            category = 'token';
+          } else if (urlLower.includes('/api/consultations')) {
+            category = 'consultation';
+          } else if (urlLower.includes('/api/bills')) {
+            category = 'bill';
+          } else if (urlLower.includes('/api/pharmacy/dispense')) {
+            category = 'dispense';
+          } else if (urlLower.includes('/api/inventory')) {
+            category = 'inventory';
+          } else if (urlLower.includes('/api/users') || urlLower.includes('/api/departments') || urlLower.includes('/admin/reset') || urlLower.includes('password')) {
+            category = 'admin';
+          }
+          
+          if (category === 'patient') {
+            cacheVersions.patients = (cacheVersions.patients || 1) + 1;
+            cacheVersions.system = (cacheVersions.system || 1) + 1;
+          } else if (category === 'token') {
+            cacheVersions.tokens = (cacheVersions.tokens || 1) + 1;
+            cacheVersions.system = (cacheVersions.system || 1) + 1;
+          } else if (category === 'consultation') {
+            cacheVersions.tokens = (cacheVersions.tokens || 1) + 1;
+            cacheVersions.attendance = (cacheVersions.attendance || 1) + 1;
+            cacheVersions.system = (cacheVersions.system || 1) + 1;
+          } else if (category === 'bill') {
+            cacheVersions.revenue = (cacheVersions.revenue || 1) + 1;
+            cacheVersions.system = (cacheVersions.system || 1) + 1;
+          } else if (category === 'dispense') {
+            cacheVersions.inventory = (cacheVersions.inventory || 1) + 1;
+            cacheVersions.revenue = (cacheVersions.revenue || 1) + 1;
+            cacheVersions.system = (cacheVersions.system || 1) + 1;
+          } else if (category === 'inventory') {
+            cacheVersions.inventory = (cacheVersions.inventory || 1) + 1;
+            cacheVersions.system = (cacheVersions.system || 1) + 1;
+          } else if (category === 'admin') {
+            cacheVersions.users = (cacheVersions.users || 1) + 1;
+            cacheVersions.attendance = (cacheVersions.attendance || 1) + 1;
+            cacheVersions.system = (cacheVersions.system || 1) + 1;
+          } else {
+            cacheVersions.system = (cacheVersions.system || 1) + 1;
+          }
+
+          broadcastSseEvent({
+            type: 'mutation',
+            category,
+            url: req.originalUrl,
+            method,
+            versions: cacheVersions,
+            timestamp: Date.now()
+          });
+        }
+      }
+    });
+    next();
+  });
+
+  // Server-Sent Events Route for real-time dashboard sync
+  app.get('/api/sync/events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    sseClients.add(res);
+
+    res.write(`data: ${JSON.stringify({ type: 'connected', versions: cacheVersions, timestamp: Date.now() })}\n\n`);
+
+    const intervalId = setInterval(() => {
+      try {
+        res.write(`data: ${JSON.stringify({ type: 'ping' })}\n\n`);
+      } catch (err) {
+        // Ignored
+      }
+    }, 25000);
+
+    req.on('close', () => {
+      sseClients.delete(res);
+      clearInterval(intervalId);
+      res.end();
+    });
+  });
+
+  // GET route to fetch the current active cache versions
+  app.get('/api/sync/versions', (req, res) => {
+    res.json(cacheVersions);
   });
 
   // General API Throttling & Protection against brute-force and overhead
@@ -686,10 +817,6 @@ async function startServer() {
     }
 
     try {
-      const timezoneOffsetHeader = req.headers['x-timezone-offset'];
-      const timezoneOffsetMin = timezoneOffsetHeader ? parseInt(timezoneOffsetHeader as string, 10) : null;
-      await checkAndResetDoctorShifts(timezoneOffsetMin);
-
       let decoded;
       try {
         decoded = jwt.verify(token, JWT_REFRESH_SECRET) as { userId: string };
@@ -1230,10 +1357,6 @@ async function startServer() {
   // Get Current Profile with live check and reset
   app.get('/api/me', authenticateJWT, async (req: any, res) => {
     try {
-      const timezoneOffsetHeader = req.headers['x-timezone-offset'];
-      const timezoneOffsetMin = timezoneOffsetHeader ? parseInt(timezoneOffsetHeader as string, 10) : null;
-      await checkAndResetDoctorShifts(timezoneOffsetMin);
-      
       const user = await prisma.user.findUnique({
         where: { id: req.user.userId }
       });
@@ -1294,8 +1417,19 @@ async function startServer() {
     }
   });
 
+  // Revenue Summary Cache
+  const revenueSummaryCache = new Map<string, { expiry: number; data: any }>();
+
   app.get('/api/admin/revenue-summary', authenticateJWT, requireRole(['ADMIN']), async (req, res) => {
     const { timeFilter } = req.query;
+    const cacheKey = String(timeFilter || 'all');
+    const nowMs = Date.now();
+    const cached = revenueSummaryCache.get(cacheKey);
+
+    if (cached && nowMs < cached.expiry) {
+      return res.json(cached.data);
+    }
+
     try {
       const now = new Date();
       const currentYear = now.getFullYear();
@@ -1515,7 +1649,7 @@ async function startServer() {
         }))
         .sort((a, b) => b.value - a.value);
 
-      res.json({
+      const responseData = {
         totalRevenueFiltered,
         outstandingInvoicesFiltered,
         settledBillsCountFiltered,
@@ -1523,7 +1657,10 @@ async function startServer() {
         dynamicGrowth,
         trendChartData,
         calculatedDeptData
-      });
+      };
+
+      revenueSummaryCache.set(cacheKey, { expiry: Date.now() + 60000, data: responseData });
+      res.json(responseData);
     } catch (error) {
       console.error('Failed to calculate revenue summary:', error);
       res.status(500).json({ error: 'Failed to calculate revenue summary' });
@@ -1956,10 +2093,6 @@ async function startServer() {
   // Staff Management
   app.get('/api/users', authenticateJWT, requireRole(['ADMIN', 'RECEPTION', 'DOCTOR']), async (req, res) => {
     try {
-      const timezoneOffsetHeader = req.headers['x-timezone-offset'];
-      const timezoneOffsetMin = timezoneOffsetHeader ? parseInt(timezoneOffsetHeader as string, 10) : null;
-      await checkAndResetDoctorShifts(timezoneOffsetMin);
-
       const { page, limit, search } = req.query;
       const pageNum = page ? parseInt(String(page), 10) : null;
       const limitNum = limit ? parseInt(String(limit), 10) : null;
@@ -3194,10 +3327,6 @@ async function startServer() {
     }
 
     try {
-      const timezoneOffsetHeader = req.headers['x-timezone-offset'];
-      const timezoneOffsetMin = timezoneOffsetHeader ? parseInt(timezoneOffsetHeader as string, 10) : null;
-      await checkAndResetDoctorShifts(timezoneOffsetMin);
-      
       const pageNum = page ? parseInt(String(page), 10) : null;
       const limitNum = limit ? parseInt(String(limit), 10) : null;
       const statusArray = status ? String(status).split(',') : undefined;
@@ -3236,23 +3365,21 @@ async function startServer() {
         ];
       }
 
-      const includeClause = { 
+      const selectClause = { 
+        id: true,
+        tokenNumber: true,
+        patientId: true,
+        doctorId: true,
+        status: true,
+        priority: true,
+        createdAt: true,
         patient: {
           select: {
             id: true,
             name: true,
             phone: true,
             age: true,
-            gender: true,
-            medicalHistory: true,
-            chronicConditions: true,
-            allergies: true,
-            createdAt: true
-          }
-        },
-        doctorQueue: {
-          select: {
-            id: true
+            gender: true
           }
         },
         visitRecord: {
@@ -3260,25 +3387,45 @@ async function startServer() {
             id: true,
             consultation: {
               select: {
-                id: true,
-                prescription: {
-                  select: {
-                    id: true,
-                    items: {
-                      select: {
-                        id: true,
-                        medicine: true,
-                        dosage: true,
-                        frequency: true,
-                        duration: true
-                      }
-                    }
-                  }
-                }
+                id: true
               }
             }
           }
         }
+      };
+
+      let doctorsList = getCachedData('doctors_lookup');
+      if (!doctorsList) {
+        doctorsList = await prisma.user.findMany({
+          where: { role: 'DOCTOR' },
+          select: { id: true, name: true }
+        });
+        setCachedData('doctors_lookup', doctorsList, 5 * 60 * 1000); // 5 minutes TTL
+      }
+
+      const mapToken = (t: any) => {
+        const d = doctorsList.find((doc: any) => doc.id === t.doctorId);
+        return {
+          id: t.id,
+          tokenNumber: t.tokenNumber,
+          status: t.status,
+          priority: t.priority,
+          createdAt: t.createdAt,
+          patientId: t.patientId,
+          doctorId: t.doctorId,
+          patient: t.patient ? {
+            id: t.patient.id,
+            name: t.patient.name,
+            phone: t.patient.phone,
+            age: t.patient.age,
+            gender: t.patient.gender
+          } : null,
+          doctor: d ? {
+            id: d.id,
+            name: d.name
+          } : null,
+          visitRecord: t.visitRecord
+        };
       };
 
       if (pageNum && limitNum) {
@@ -3287,14 +3434,14 @@ async function startServer() {
           prisma.token.count({ where: whereClause }),
           prisma.token.findMany({
             where: whereClause,
-            include: includeClause,
+            select: selectClause,
             orderBy: { createdAt: 'asc' },
             skip,
             take: limitNum
           })
         ]);
         return res.json({
-          data,
+          data: data.map(mapToken),
           page: pageNum,
           limit: limitNum,
           total,
@@ -3304,11 +3451,11 @@ async function startServer() {
 
       const tokens = await prisma.token.findMany({
         where: whereClause,
-        include: includeClause,
+        select: selectClause,
         orderBy: { createdAt: 'asc' },
         take: 1000
       });
-      res.json(tokens);
+      res.json(tokens.map(mapToken));
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch tokens' });
     }
@@ -4310,7 +4457,15 @@ async function startServer() {
         ];
       }
 
-      const includeClause = {
+      const selectClause = {
+        id: true,
+        patientId: true,
+        tokenNumber: true,
+        subtotal: true,
+        tax: true,
+        total: true,
+        status: true,
+        createdAt: true,
         patient: {
           select: {
             id: true,
@@ -4330,26 +4485,12 @@ async function startServer() {
         dispensingLog: {
           select: {
             id: true,
-            pharmacyQueueId: true,
-            dispensedAt: true,
-            pharmacistId: true,
             pharmacyQueue: {
               select: {
-                id: true,
-                prescriptionId: true,
-                status: true,
-                createdAt: true,
                 prescription: {
                   select: {
-                    id: true,
-                    patientId: true,
-                    doctorId: true,
-                    consultationId: true,
-                    status: true,
-                    createdAt: true,
                     doctor: {
                       select: {
-                        name: true,
                         department: true
                       }
                     }
@@ -4367,7 +4508,7 @@ async function startServer() {
           prisma.bill.count({ where: whereClause }),
           prisma.bill.findMany({
             where: whereClause,
-            include: includeClause,
+            select: selectClause,
             orderBy: { createdAt: 'desc' },
             skip,
             take: limitNum
@@ -4384,7 +4525,7 @@ async function startServer() {
 
       const bills = await prisma.bill.findMany({
         where: whereClause,
-        include: includeClause,
+        select: selectClause,
         orderBy: { createdAt: 'desc' },
         take: 1000
       });

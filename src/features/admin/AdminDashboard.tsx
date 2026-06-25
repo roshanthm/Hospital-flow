@@ -6,7 +6,7 @@
 import { motion } from "motion/react";
 import React, { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { useStore, authFetch } from "@/src/store/useStore";
+import { useStore, authFetch, getClientCachedJSON, clearClientCache } from "@/src/store/useStore";
 import { 
   Users, Activity, Clock, ArrowUpRight, 
   Calendar, Download, Bell, HelpCircle, 
@@ -29,6 +29,37 @@ const formatLocalDate = (dateObj: Date): string => {
   return `${y}-${m}-${d}`;
 };
 
+const getFilterDates = (filter: string, startInput?: string, endInput?: string) => {
+  let startStr = '';
+  let endStr = '';
+  const todayVal = new Date();
+  if (filter === 'today') {
+    const str = formatLocalDate(todayVal);
+    startStr = str;
+    endStr = str;
+  } else if (filter === 'yesterday') {
+    const yes = new Date();
+    yes.setDate(yes.getDate() - 1);
+    const str = formatLocalDate(yes);
+    startStr = str;
+    endStr = str;
+  } else if (filter === '7days') {
+    const s = new Date();
+    s.setDate(s.getDate() - 6);
+    startStr = formatLocalDate(s);
+    endStr = formatLocalDate(todayVal);
+  } else if (filter === '30days') {
+    const s = new Date();
+    s.setDate(s.getDate() - 29);
+    startStr = formatLocalDate(s);
+    endStr = formatLocalDate(todayVal);
+  } else if (filter === 'custom') {
+    startStr = startInput || formatLocalDate(todayVal);
+    endStr = endInput || formatLocalDate(todayVal);
+  }
+  return { startStr, endStr };
+};
+
 export default function AdminDashboard() {
   const users = useStore(state => state.users);
   const patients = useStore(state => state.patients);
@@ -46,22 +77,77 @@ export default function AdminDashboard() {
   const fetchActivityLogs = useStore(state => state.fetchActivityLogs);
 
   const [consultations, setConsultations] = useState<any[]>([]);
-  const [timeFilter, setTimeFilter] = useState<'30days' | '24h' | '7days'>('30days');
+  
+  const [timeFilter, setTimeFilter] = useState<'30days' | '24h' | '7days'>(() => {
+    return (sessionStorage.getItem('admin_timeFilter') as any) || '30days';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('admin_timeFilter', timeFilter);
+  }, [timeFilter]);
+
   const [pendingResetsCount, setPendingResetsCount] = useState<number>(0);
 
   // --- DOCTOR ATTENDANCE & ACTIVITY TRACKING STATE ---
-  const [attendanceRows, setAttendanceRows] = useState<any[]>([]);
-  const [attendanceSummary, setAttendanceSummary] = useState<any>({
-    doctorsPresentToday: 0,
-    doctorsAbsentToday: 0,
-    doctorsOnDutyNow: 0,
-    avgConsultations: 0
+  const [attendanceFilter, setAttendanceFilter] = useState<'today' | 'yesterday' | '7days' | '30days' | 'custom'>(() => {
+    return (sessionStorage.getItem('admin_attendanceFilter') as any) || 'today';
   });
-  const [attendanceFilter, setAttendanceFilter] = useState<'today' | 'yesterday' | '7days' | '30days' | 'custom'>('today');
-  const [attStartInput, setAttStartInput] = useState<string>(formatLocalDate(new Date()));
-  const [attEndInput, setAttEndInput] = useState<string>(formatLocalDate(new Date()));
-  const [isAttLoading, setIsAttLoading] = useState<boolean>(false);
-  const [attendanceSearchTerm, setAttendanceSearchTerm] = useState<string>('');
+  useEffect(() => {
+    sessionStorage.setItem('admin_attendanceFilter', attendanceFilter);
+  }, [attendanceFilter]);
+
+  const [attStartInput, setAttStartInput] = useState<string>(() => {
+    return sessionStorage.getItem('admin_attStartInput') || formatLocalDate(new Date());
+  });
+  useEffect(() => {
+    sessionStorage.setItem('admin_attStartInput', attStartInput);
+  }, [attStartInput]);
+
+  const [attEndInput, setAttEndInput] = useState<string>(() => {
+    return sessionStorage.getItem('admin_attEndInput') || formatLocalDate(new Date());
+  });
+  useEffect(() => {
+    sessionStorage.setItem('admin_attEndInput', attEndInput);
+  }, [attEndInput]);
+
+  const [attendanceSearchTerm, setAttendanceSearchTerm] = useState<string>(() => {
+    return sessionStorage.getItem('admin_attendanceSearchTerm') || '';
+  });
+  useEffect(() => {
+    sessionStorage.setItem('admin_attendanceSearchTerm', attendanceSearchTerm);
+  }, [attendanceSearchTerm]);
+
+  const [attendanceRows, setAttendanceRows] = useState<any[]>(() => {
+    const filter = (sessionStorage.getItem('admin_attendanceFilter') as any) || 'today';
+    const sInput = sessionStorage.getItem('admin_attStartInput') || formatLocalDate(new Date());
+    const eInput = sessionStorage.getItem('admin_attEndInput') || formatLocalDate(new Date());
+    const { startStr, endStr } = getFilterDates(filter, sInput, eInput);
+    const cached = getClientCachedJSON(`/api/admin/doctor-attendance?startDate=${startStr}&endDate=${endStr}`);
+    return cached?.rows || [];
+  });
+
+  const [attendanceSummary, setAttendanceSummary] = useState<any>(() => {
+    const filter = (sessionStorage.getItem('admin_attendanceFilter') as any) || 'today';
+    const sInput = sessionStorage.getItem('admin_attStartInput') || formatLocalDate(new Date());
+    const eInput = sessionStorage.getItem('admin_attEndInput') || formatLocalDate(new Date());
+    const { startStr, endStr } = getFilterDates(filter, sInput, eInput);
+    const cached = getClientCachedJSON(`/api/admin/doctor-attendance?startDate=${startStr}&endDate=${endStr}`);
+    return cached?.summary || {
+      doctorsPresentToday: 0,
+      doctorsAbsentToday: 0,
+      doctorsOnDutyNow: 0,
+      avgConsultations: 0
+    };
+  });
+
+  const [isAttLoading, setIsAttLoading] = useState<boolean>(() => {
+    const filter = (sessionStorage.getItem('admin_attendanceFilter') as any) || 'today';
+    const sInput = sessionStorage.getItem('admin_attStartInput') || formatLocalDate(new Date());
+    const eInput = sessionStorage.getItem('admin_attEndInput') || formatLocalDate(new Date());
+    const { startStr, endStr } = getFilterDates(filter, sInput, eInput);
+    const cached = getClientCachedJSON(`/api/admin/doctor-attendance?startDate=${startStr}&endDate=${endStr}`);
+    return !cached;
+  });
+
   const [expandedDoctors, setExpandedDoctors] = useState<{ [id: string]: boolean }>({});
 
   const fetchAttendance = useCallback(async (silent: boolean = false) => {
@@ -114,12 +200,19 @@ export default function AdminDashboard() {
 
       if (res.ok) {
         const data = await res.json();
-        setAttendanceRows(data.rows || []);
-        setAttendanceSummary(data.summary || {
-          doctorsPresentToday: 0,
-          doctorsAbsentToday: 0,
-          doctorsOnDutyNow: 0,
-          avgConsultations: 0
+        setAttendanceRows((prev: any[]) => {
+          if (JSON.stringify(prev) === JSON.stringify(data.rows || [])) return prev;
+          return data.rows || [];
+        });
+        setAttendanceSummary((prev: any) => {
+          const nextSum = data.summary || {
+            doctorsPresentToday: 0,
+            doctorsAbsentToday: 0,
+            doctorsOnDutyNow: 0,
+            avgConsultations: 0
+          };
+          if (JSON.stringify(prev) === JSON.stringify(nextSum)) return prev;
+          return nextSum;
         });
       } else {
         if (!silent) {
@@ -141,11 +234,17 @@ export default function AdminDashboard() {
   }, [attendanceFilter, attStartInput, attEndInput]);
 
   useEffect(() => {
-    fetchAttendance();
-  }, [fetchAttendance]);
+    const { startStr, endStr } = getFilterDates(attendanceFilter, attStartInput, attEndInput);
+    const hasCache = !!getClientCachedJSON(`/api/admin/doctor-attendance?startDate=${startStr}&endDate=${endStr}`);
+    fetchAttendance(hasCache);
+  }, [fetchAttendance, attendanceFilter, attStartInput, attEndInput]);
 
-  const [summaryData, setSummaryData] = useState<any>(null);
-  const [isSummaryLoading, setIsSummaryLoading] = useState(true);
+  const [summaryData, setSummaryData] = useState<any>(() => {
+    return getClientCachedJSON(`/api/admin/operational-summary?timeFilter=${timeFilter}`);
+  });
+  const [isSummaryLoading, setIsSummaryLoading] = useState(() => {
+    return !getClientCachedJSON(`/api/admin/operational-summary?timeFilter=${timeFilter}`);
+  });
 
   const fetchSummary = useCallback(async (silent = false) => {
     if (!silent) setIsSummaryLoading(true);
@@ -153,7 +252,10 @@ export default function AdminDashboard() {
       const res = await authFetch(`/api/admin/operational-summary?timeFilter=${timeFilter}`);
       if (res.ok) {
         const data = await res.json();
-        setSummaryData(data);
+        setSummaryData((prev: any) => {
+          if (JSON.stringify(prev) === JSON.stringify(data)) return prev;
+          return data;
+        });
       }
     } catch (e) {
       console.error("Failed to load operational summary:", e);
@@ -163,8 +265,24 @@ export default function AdminDashboard() {
   }, [timeFilter]);
 
   useEffect(() => {
-    fetchSummary();
-  }, [fetchSummary]);
+    const hasCache = !!getClientCachedJSON(`/api/admin/operational-summary?timeFilter=${timeFilter}`);
+    fetchSummary(hasCache);
+  }, [fetchSummary, timeFilter]);
+
+  // Hook up real-time SSE cache invalidation to trigger silent background refreshes
+  useEffect(() => {
+    const handleInvalidation = (e: any) => {
+      const keys = e.detail?.keys || [];
+      if (keys.some((k: string) => k.includes('/api/admin/operational-summary'))) {
+        fetchSummary(true);
+      }
+      if (keys.some((k: string) => k.includes('/api/admin/doctor-attendance'))) {
+        fetchAttendance(true);
+      }
+    };
+    window.addEventListener('medflow:cache-invalidated', handleInvalidation);
+    return () => window.removeEventListener('medflow:cache-invalidated', handleInvalidation);
+  }, [fetchSummary, fetchAttendance]);
 
   useEffect(() => {
     // Fetch password reset requests to show alerts in real-time
@@ -531,6 +649,7 @@ export default function AdminDashboard() {
   const handleManualRefresh = async () => {
     const toastId = toast.loading('Refreshing dashboard metrics...');
     try {
+      clearClientCache();
       await Promise.all([
         fetchAttendance(true),
         fetchSummary(true),
