@@ -375,7 +375,7 @@ export default function PharmacyDashboard() {
     const end = dateRangeActive ? filterEndDate : undefined;
     
     const timer = setTimeout(() => {
-      fetchBills(start, end, true, billingPage, 5, status === 'all' ? undefined : status, search);
+      fetchBills(start, end, true, billingPage, 12, status === 'all' ? undefined : status, search);
     }, 300);
 
     return () => clearTimeout(timer);
@@ -1124,6 +1124,41 @@ export default function PharmacyDashboard() {
   const yesterdayDate = new Date();
   yesterdayDate.setDate(yesterdayDate.getDate() - 1);
   const yesterdayStr = getLocalDateString(yesterdayDate);
+
+  const handleExportBills = async (format: 'pdf' | 'excel') => {
+    const toastId = toast.loading('Fetching billing history for export...');
+    try {
+      const params = new URLSearchParams();
+      if (billingFilter !== 'all') params.append('status', billingFilter);
+      if (searchTerm) params.append('search', searchTerm);
+      if (dateRangeActive && filterStartDate) params.append('startDate', filterStartDate);
+      if (dateRangeActive && filterEndDate) params.append('endDate', filterEndDate);
+      if (selectedMedFilter && selectedMedFilter !== 'All Medications') params.append('medication', selectedMedFilter);
+
+      const res = await authFetch(`/api/export/bills?${params.toString()}`);
+      if (!res.ok) {
+        throw new Error('Failed to fetch bills for export');
+      }
+      const data = await res.json();
+      
+      if (!data || data.length === 0) {
+        toast.error('No records found for the selected filters.', { id: toastId });
+        return;
+      }
+
+      toast.success('Records fetched successfully, generating document...', { id: toastId });
+
+      if (format === 'pdf') {
+        generateAllBillsPDF(data);
+        // The PDF generator handles its own success message or we can do it here, but toast is enough
+      } else {
+        exportToExcel(data);
+      }
+    } catch (err: any) {
+      console.error(err);
+      toast.error('Export failed: ' + err.message, { id: toastId });
+    }
+  };
 
   return (
     <div className="flex bg-[#f5f7fa] text-[#111827] min-h-screen font-sans">
@@ -2737,13 +2772,10 @@ export default function PharmacyDashboard() {
                     </div>
                   )}
 
-                  <button onClick={() => {
-                    generateAllBillsPDF(filteredBillsList);
-                    toast.success('Bulk PDF compiled.');
-                  }} className="btn btn-outline flex items-center gap-1 cursor-pointer">
+                  <button onClick={() => handleExportBills('pdf')} className="btn btn-outline flex items-center gap-1 cursor-pointer">
                     <Upload size={14} /> PDF Report
                   </button>
-                  <button onClick={() => exportToExcel(filteredBillsList)} className="btn btn-outline flex items-center gap-1 border-teal-600 text-teal-700 hover:bg-teal-50 cursor-pointer">
+                  <button onClick={() => handleExportBills('excel')} className="btn btn-outline flex items-center gap-1 border-teal-600 text-teal-700 hover:bg-teal-50 cursor-pointer">
                     <FileSpreadsheet size={14} /> Excel Ledger
                   </button>
                 </div>
@@ -2803,7 +2835,7 @@ export default function PharmacyDashboard() {
                   (bills || []).flatMap((b: any) => (b.items || []).map((it: any) => it.name))
                 )).filter(Boolean) as string[];
 
-                const billsPageSize = 5;
+                const billsPageSize = 12;
                 const activeTotal = billsTotalCount > 0 ? billsTotalCount : (filteredBillsList.length || 0);
                 const totalBillPages = Math.ceil(activeTotal / billsPageSize) || 1;
                 const paginatedBillsList = billsPaginated && billsPaginated.length > 0 

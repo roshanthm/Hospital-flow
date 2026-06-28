@@ -39,6 +39,7 @@ export default function GenerateTokenModal({ isOpen, onClose }: GenerateTokenMod
   const [searchedPatients, setSearchedPatients] = useState<any[]>([]);
   const [recentPatients, setRecentPatients] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
 
   // Load backend data
   useEffect(() => {
@@ -261,6 +262,7 @@ export default function GenerateTokenModal({ isOpen, onClose }: GenerateTokenMod
   };
 
   const handleGenerate = async () => {
+    if (isGenerating) return;
     if (!selectedPatient) {
       toast.error('Please select or search a patient first.');
       return;
@@ -270,6 +272,7 @@ export default function GenerateTokenModal({ isOpen, onClose }: GenerateTokenMod
       return;
     }
 
+    setIsGenerating(true);
     try {
       const response = await addAppointment({
         patientId: selectedPatient.id,
@@ -315,6 +318,8 @@ export default function GenerateTokenModal({ isOpen, onClose }: GenerateTokenMod
 
     } catch (e: any) {
       toast.error(e.message || 'Failed to generate token. Please try again.');
+    } finally {
+      setIsGenerating(false);
     }
   };
 
@@ -675,9 +680,9 @@ export default function GenerateTokenModal({ isOpen, onClose }: GenerateTokenMod
                 <button
                   type="button"
                   onClick={handleGenerate}
-                  disabled={activeDoctors.length === 0 || !isAnyDoctorOnDuty}
+                  disabled={activeDoctors.length === 0 || !isAnyDoctorOnDuty || isGenerating}
                   className={`px-5 py-2.5 rounded-xl bg-[#001a48] hover:bg-[#002d72] text-white font-bold text-sm transition-all flex items-center justify-center gap-1.5 shadow-md active:scale-95 ${
-                    (activeDoctors.length === 0 || !isAnyDoctorOnDuty) ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
+                    (activeDoctors.length === 0 || !isAnyDoctorOnDuty || isGenerating) ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
                   }`}
                 >
                   <CheckCircle2 size={16} />

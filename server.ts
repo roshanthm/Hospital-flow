@@ -364,7 +364,7 @@ async function checkAndResetDoctorShifts(timezoneOffsetMin?: number | null) {
 }
 
 // Start background interval for doctor shift reset (runs every 30 seconds, non-blocking)
-setInterval(() => {
+const doctorShiftInterval = setInterval(() => {
   checkAndResetDoctorShifts().catch(err => {
     console.error("Error in background checkAndResetDoctorShifts:", err);
   });
@@ -519,6 +519,288 @@ async function startServer() {
     next();
   });
 
+  // --- Health and Readiness Check Endpoints ---
+  app.get('/api/health', (req, res) => {
+    res.status(200).json({
+      status: 'healthy',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      version: '1.0.0',
+      environment: process.env.NODE_ENV || 'development'
+    });
+  });
+
+  app.get('/api/ready', async (req, res) => {
+    try {
+      // Perform a minimal, non-expensive dependency check (database reachability)
+      await prisma.$queryRaw`SELECT 1`;
+      res.status(200).json({
+        status: 'ready',
+        database: 'connected',
+        timestamp: new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.error('[READINESS PROBE FAILED]:', err.message || err);
+      res.status(503).json({
+        status: 'unready',
+        error: 'Database connection failed',
+        details: process.env.NODE_ENV === 'production' ? undefined : err.message
+      });
+    }
+  });
+
+  // --- Input Validation & Stored XSS Prevention Middleware ---
+  const CLINICAL_FIELDS = new Set([
+    'notes', 'diagnosis', 'observations', 'symptoms', 'chiefComplaint', 'vitals', 
+    'allergies', 'prescription', 'referralReason', 'medicalHistory', 'chronicConditions'
+  ]);
+
+  function checkNullAndControlChars(val: string): boolean {
+    if (val.includes('\0')) return true;
+    // ASCII control characters are from 0x00 to 0x1F, and 0x7F. We allow tab (\t), newline (\n), and carriage return (\r).
+    if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(val)) return true;
+    return false;
+  }
+
+  function sanitizeInputString(val: string, isClinical: boolean): string {
+    if (!val) return val;
+    let clean = val;
+
+    if (isClinical) {
+      // For clinical text, only remove explicit script tags, iframe/object/embed/svg tags, onEvent attributes, and javascript: links.
+      // Do NOT strip generic HTML-like markers or brackets to avoid messing up medical text (like '< 120' or '> 50').
+      clean = clean.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, '');
+      clean = clean.replace(/<script\b[^>]*>/gi, '');
+      clean = clean.replace(/<\/script>/gi, '');
+      clean = clean.replace(/<iframe\b[^>]*>([\s\S]*?)<\/iframe>/gi, '');
+      clean = clean.replace(/<iframe\b[^>]*>/gi, '');
+      clean = clean.replace(/<svg\b[^>]*>([\s\S]*?)<\/svg>/gi, '');
+      clean = clean.replace(/<svg\b[^>]*>/gi, '');
+      
+      clean = clean.replace(/\bon\w+\s*=\s*['"`][^'"`]*['"`]/gi, '');
+      clean = clean.replace(/\bon\w+\s*=\s*[^>\s]+/gi, '');
+      clean = clean.replace(/javascript\s*:\s*[^"'>\s]+/gi, '');
+      clean = clean.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+    } else {
+      // 1. Remove script blocks and tags entirely
+      clean = clean.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, '');
+      clean = clean.replace(/<script\b[^>]*>/gi, '');
+      clean = clean.replace(/<\/script>/gi, '');
+
+      // 2. Remove other dangerous tags entirely (iframe, object, embed, svg, style, link)
+      clean = clean.replace(/<iframe\b[^>]*>([\s\S]*?)<\/iframe>/gi, '');
+      clean = clean.replace(/<iframe\b[^>]*>/gi, '');
+      clean = clean.replace(/<svg\b[^>]*>([\s\S]*?)<\/svg>/gi, '');
+      clean = clean.replace(/<svg\b[^>]*>/gi, '');
+      clean = clean.replace(/<object\b[^>]*>([\s\S]*?)<\/object>/gi, '');
+      clean = clean.replace(/<object\b[^>]*>/gi, '');
+      clean = clean.replace(/<embed\b[^>]*>/gi, '');
+      clean = clean.replace(/<link\b[^>]*>/gi, '');
+      clean = clean.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, '');
+      clean = clean.replace(/<style\b[^>]*>/gi, '');
+
+      // 3. Remove img tags entirely
+      clean = clean.replace(/<img\b[^>]*>/gi, '');
+
+      // 4. Remove generic html tags but preserve content
+      clean = clean.replace(/<\/?([a-zA-Z]+)([^>]*?)>/g, '');
+
+      // 5. Remove onEVENT attributes if they somehow remained
+      clean = clean.replace(/\bon\w+\s*=\s*['"`][^'"`]*['"`]/gi, '');
+      clean = clean.replace(/\bon\w+\s*=\s*[^>\s]+/gi, '');
+
+      // 6. Remove javascript: links
+      clean = clean.replace(/javascript\s*:\s*[^"'>\s]+/gi, '');
+
+      // 7. Remove any null bytes or control characters except tabs, carriage returns, and newlines
+      clean = clean.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+    }
+
+    return clean.trim();
+  }
+
+  function validatePayload(body: any, errors: string[], path = '', reqPath?: string): void {
+    if (!body || typeof body !== 'object') return;
+
+    for (const [key, val] of Object.entries(body)) {
+      const currentPath = path ? `${path}.${key}` : key;
+
+      if (typeof val === 'string') {
+        // Check for null bytes and control characters
+        if (checkNullAndControlChars(val)) {
+          errors.push(`Field '${currentPath}' contains invalid null bytes or control characters.`);
+          continue;
+        }
+
+        // Sanitize string (except password fields)
+        if (key !== 'password') {
+          const isClinical = CLINICAL_FIELDS.has(key);
+          const cleanedVal = sanitizeInputString(val, isClinical);
+          body[key] = cleanedVal;
+
+          // If original had text but cleaned value is empty, reject!
+          if (val.trim().length > 0 && cleanedVal.length === 0) {
+            errors.push(`Field '${currentPath}' contains forbidden HTML tags, scripts, or malicious content.`);
+            continue;
+          }
+        }
+
+        const trimmedVal = body[key].trim();
+
+        // Human name validation
+        const isEmergencyContact = (key === 'emergencyContactName');
+        const isHumanName = isEmergencyContact || (
+          key === 'name' && 
+          reqPath && 
+          (reqPath.startsWith('/api/patients') || reqPath.startsWith('/api/users'))
+        );
+
+        if (isHumanName && trimmedVal.length > 0) {
+          if (!/^[\p{L}\p{M}\s'\-.]+$/u.test(trimmedVal)) {
+            errors.push(`Field '${currentPath}' must contain only valid name characters (letters, spaces, apostrophes, hyphens, periods).`);
+          }
+        }
+
+        // Phone number validation
+        if ((key === 'phone' || key === 'emergencyContactPhone') && trimmedVal.length > 0) {
+          if (!/^\+?[0-9\s\-()]+$/.test(trimmedVal)) {
+            errors.push(`Field '${currentPath}' must be a valid phone number format (digits, spaces, hyphens, parentheses, optional leading +).`);
+          }
+        }
+
+        // Email format validation
+        if (key === 'email' && trimmedVal.length > 0) {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedVal)) {
+            errors.push(`Field '${currentPath}' must be a valid email format.`);
+          }
+        }
+
+        // Date fields validation
+        if (['dateOfBirth', 'dateJoined', 'expiryDate', 'startTime'].includes(key) && trimmedVal.length > 0) {
+          if (isNaN(Date.parse(trimmedVal))) {
+            errors.push(`Field '${currentPath}' must be a valid date format.`);
+          }
+        }
+
+        // Role enum validation
+        if (key === 'role' && trimmedVal.length > 0) {
+          const allowedRoles = ['ADMIN', 'DOCTOR', 'RECEPTION', 'PHARMACY'];
+          const upperRole = trimmedVal.toUpperCase();
+          if (!allowedRoles.includes(upperRole)) {
+            errors.push(`Field '${currentPath}' must be an approved role.`);
+          } else {
+            body[key] = upperRole; // store consistently in uppercase
+          }
+        }
+
+        // Gender enum validation & normalization
+        if (key === 'gender' && trimmedVal.length > 0) {
+          const upperGender = trimmedVal.toUpperCase();
+          if (upperGender === 'M' || upperGender === 'MALE') {
+            body[key] = 'M';
+          } else if (upperGender === 'F' || upperGender === 'FEMALE') {
+            body[key] = 'F';
+          } else if (upperGender === 'O' || upperGender === 'OTHER') {
+            body[key] = 'O';
+          } else {
+            errors.push(`Field '${currentPath}' must be an approved gender (MALE/M, FEMALE/F, OTHER/O).`);
+          }
+        }
+
+        // Handle string representation of numeric fields
+        if (key === 'age' && trimmedVal.length > 0) {
+          const parsedAge = parseInt(trimmedVal, 10);
+          if (isNaN(parsedAge) || parsedAge < 0 || parsedAge > 125) {
+            errors.push(`Field '${currentPath}' must be a valid age between 0 and 125.`);
+          }
+        }
+        if (['stockQuantity', 'minThreshold', 'maxThreshold', 'reorderLevel'].includes(key) && trimmedVal.length > 0) {
+          const parsedNum = Number(trimmedVal);
+          if (isNaN(parsedNum) || parsedNum < 0) {
+            errors.push(`Field '${currentPath}' must be a non-negative number.`);
+          }
+        }
+        if (['purchasePrice', 'sellingPrice', 'price'].includes(key) && trimmedVal.length > 0) {
+          const parsedNum = Number(trimmedVal);
+          if (isNaN(parsedNum) || parsedNum < 0) {
+            errors.push(`Field '${currentPath}' must be a non-negative price.`);
+          }
+        }
+      } else if (typeof val === 'number') {
+        if (key === 'age') {
+          if (val < 0 || val > 125) {
+            errors.push(`Field '${currentPath}' must be a valid age between 0 and 125.`);
+          }
+        }
+        if (['stockQuantity', 'minThreshold', 'maxThreshold', 'reorderLevel'].includes(key)) {
+          if (val < 0) {
+            errors.push(`Field '${currentPath}' must be a non-negative number.`);
+          }
+        }
+        if (['purchasePrice', 'sellingPrice', 'price'].includes(key)) {
+          if (val < 0) {
+            errors.push(`Field '${currentPath}' must be a non-negative price.`);
+          }
+        }
+      } else if (Array.isArray(val)) {
+        val.forEach((item, idx) => {
+          validatePayload(item, errors, `${currentPath}[${idx}]`, reqPath);
+        });
+      } else if (val && typeof val === 'object') {
+        validatePayload(val, errors, currentPath, reqPath);
+      }
+    }
+  }
+
+  function validateQuery(query: any, errors: string[], path = ''): void {
+    if (!query || typeof query !== 'object') return;
+
+    for (const [key, val] of Object.entries(query)) {
+      const currentPath = path ? `${path}.${key}` : key;
+
+      if (typeof val === 'string') {
+        if (checkNullAndControlChars(val)) {
+          errors.push(`Query parameter '${currentPath}' contains invalid null bytes or control characters.`);
+          continue;
+        }
+        
+        // Sanitize the query value
+        const cleanedVal = sanitizeInputString(val, false);
+        query[key] = cleanedVal;
+
+        if (val.trim().length > 0 && cleanedVal.length === 0) {
+          errors.push(`Query parameter '${currentPath}' contains forbidden HTML tags, scripts, or malicious content.`);
+          continue;
+        }
+      } else if (Array.isArray(val)) {
+        val.forEach((item, idx) => {
+          validateQuery({ [idx]: item }, errors, `${currentPath}`);
+        });
+      } else if (val && typeof val === 'object') {
+        validateQuery(val, errors, currentPath);
+      }
+    }
+  }
+
+  // Global Input Validation Middleware
+  app.use((req, res, next) => {
+    const errors: string[] = [];
+
+    // Scan req.body on POST, PUT, PATCH requests
+    if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+      validatePayload(req.body, errors, '', req.path);
+    }
+
+    // Scan req.query on all requests
+    validateQuery(req.query, errors);
+
+    if (errors.length > 0) {
+      return res.status(400).json({ error: errors[0] });
+    }
+
+    next();
+  });
+
   // Temporary Telemetry Middleware for Phase D Target Audits
   app.use((req, res, next) => {
     const targets = [
@@ -626,6 +908,7 @@ async function startServer() {
         // Ignored
       }
     }, 25000);
+    (res as any).intervalId = intervalId;
 
     req.on('close', () => {
       sseClients.delete(res);
@@ -2375,7 +2658,7 @@ async function startServer() {
         isActive: true,
         dutyStatus: dutyStatus || 'INACTIVE',
         shiftType: shiftType || 'MORNING',
-        email: (role === 'DOCTOR' && email && email.trim()) ? email.trim() : null,
+        email: (email && email.trim()) ? email.trim() : null,
         employeeId: employeeId.trim(),
         addressLine1: addressLine1 && addressLine1.trim() ? addressLine1.trim() : null,
         addressLine2: addressLine2 && addressLine2.trim() ? addressLine2.trim() : null,
@@ -2392,7 +2675,7 @@ async function startServer() {
         requiresPasswordChange: false
       };
 
-      if (role === 'DOCTOR' && password && password.trim()) {
+      if (password && password.trim()) {
         userData.password = await hashPassword(password);
       } else {
         userData.password = null;
@@ -2455,32 +2738,30 @@ async function startServer() {
       }
 
       if (finalRole !== 'DOCTOR') {
-        updateData.email = null;
-        updateData.password = null;
         updateData.pin = null;
       } else {
         if (pin !== undefined) updateData.pin = pin && pin.trim() ? pin.trim() : null;
-        if (email !== undefined) {
-          updateData.email = email && email.trim() ? email.trim() : null;
-          if (updateData.email) {
-            const existing = await prisma.user.findFirst({
-              where: { email: updateData.email, NOT: { id: req.params.id } }
-            });
-            if (existing) {
-              return res.status(400).json({ error: 'A staff member with this email already exists.' });
-            }
+      }
+
+      if (email !== undefined) {
+        updateData.email = email && email.trim() ? email.trim() : null;
+        if (updateData.email) {
+          const existing = await prisma.user.findFirst({
+            where: { email: updateData.email, NOT: { id: req.params.id } }
+          });
+          if (existing) {
+            return res.status(400).json({ error: 'A staff member with this email already exists.' });
           }
         }
-        if (password !== undefined) {
-          if (password && password.trim()) {
-            const isAlreadyHashed = password.startsWith('$2a$') || password.startsWith('$2b$') || password.startsWith('$2y$');
-            if (!isAlreadyHashed) {
-              updateData.password = await hashPassword(password);
-            } else {
-              updateData.password = password;
-            }
+      }
+
+      if (password !== undefined) {
+        if (password && password.trim()) {
+          const isAlreadyHashed = password.startsWith('$2a$') || password.startsWith('$2b$') || password.startsWith('$2y$');
+          if (!isAlreadyHashed) {
+            updateData.password = await hashPassword(password);
           } else {
-            updateData.password = null;
+            updateData.password = password;
           }
         }
       }
@@ -2670,33 +2951,9 @@ async function startServer() {
       const cached = getCachedData(cacheKey);
       if (cached) return res.json(cached);
 
-      let depts = await prisma.department.findMany({
+      const depts = await prisma.department.findMany({
         orderBy: { name: 'asc' }
       });
-      if (depts.length === 0) {
-        const defaultDepartments = [
-          'Cardiology',
-          'General Medicine',
-          'Pediatrics',
-          'Orthopedics',
-          'Pharmacy',
-          'Reception',
-          'Laboratory',
-          'Billing',
-          'Administration',
-          'Oncology',
-          'Neurology',
-          'Emergency',
-          'Diagnostics'
-        ];
-        await prisma.department.createMany({
-          data: defaultDepartments.map(name => ({ name })),
-          skipDuplicates: true
-        });
-        depts = await prisma.department.findMany({
-          orderBy: { name: 'asc' }
-        });
-      }
       setCachedData(cacheKey, depts, 15 * 60 * 1000);
       res.json(depts);
     } catch (error) {
@@ -3112,19 +3369,6 @@ async function startServer() {
         return res.status(404).json({ error: 'Patient not found' });
       }
 
-      const activeUser = await prisma.user.findUnique({
-        where: { id: req.user.userId }
-      });
-
-      await prisma.activityLog.create({
-        data: {
-          userId: req.user.userId,
-          userName: activeUser?.name || 'Staff User',
-          action: 'PATIENT_OPENED',
-          details: `Opened patient record: ${patient.name} (ID: ${patient.id})`
-        }
-      });
-
       res.json(patient);
     } catch (error) {
       console.error('Error fetching patient:', error);
@@ -3218,26 +3462,151 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/patients/:id', authenticateJWT, requireRole(['ADMIN']), async (req, res) => {
+    try {
+      const patientId = req.params.id;
+      
+      const patient = await prisma.patient.findUnique({
+        where: { id: patientId }
+      });
+      
+      if (!patient) {
+        return res.status(404).json({ error: 'Patient not found' });
+      }
+
+      // Fetch related record ids for deletion to prevent FK constraints
+      const appointments = await prisma.appointment.findMany({ where: { patientId }, select: { id: true } });
+      const appointmentIds = appointments.map(a => a.id);
+
+      const tokens = await prisma.token.findMany({ where: { patientId }, select: { id: true } });
+      const tokenIds = tokens.map(t => t.id);
+
+      const doctorQueues = await prisma.doctorQueue.findMany({ where: { patientId }, select: { id: true } });
+      const doctorQueueIds = doctorQueues.map(dq => dq.id);
+
+      const doctorAssignments = await prisma.doctorAssignment.findMany({ where: { patientId }, select: { id: true } });
+      const doctorAssignmentIds = doctorAssignments.map(da => da.id);
+
+      const medicalHistories = await prisma.medicalHistory.findMany({ where: { patientId }, select: { id: true } });
+      const medicalHistoryIds = medicalHistories.map(mh => mh.id);
+
+      const visitRecords = await prisma.visitRecord.findMany({ where: { patientId }, select: { id: true } });
+      const visitRecordIds = visitRecords.map(vr => vr.id);
+
+      const consultations = await prisma.consultation.findMany({ where: { patientId }, select: { id: true } });
+      const consultationIds = consultations.map(c => c.id);
+
+      const prescriptions = await prisma.prescription.findMany({ where: { patientId }, select: { id: true } });
+      const prescriptionIds = prescriptions.map(pr => pr.id);
+
+      const prescriptionItems = await prisma.prescriptionItem.findMany({
+        where: { prescriptionId: { in: prescriptionIds } },
+        select: { id: true }
+      });
+      const prescriptionItemIds = prescriptionItems.map(pi => pi.id);
+
+      const pharmacyQueues = await prisma.pharmacyQueue.findMany({
+        where: { prescriptionId: { in: prescriptionIds } },
+        select: { id: true }
+      });
+      const pharmacyQueueIds = pharmacyQueues.map(pq => pq.id);
+
+      const pharmacyDispensingLogs = await prisma.pharmacyDispensingLog.findMany({
+        where: { pharmacyQueueId: { in: pharmacyQueueIds } },
+        select: { id: true }
+      });
+      const pharmacyDispensingLogIds = pharmacyDispensingLogs.map(pdl => pdl.id);
+
+      const bills = await prisma.bill.findMany({ where: { patientId }, select: { id: true } });
+      const billIds = bills.map(b => b.id);
+
+      const billItems = await prisma.billItem.findMany({
+        where: { billId: { in: billIds } },
+        select: { id: true }
+      });
+      const billItemIds = billItems.map(bi => bi.id);
+
+      const labRequests = await prisma.labRequest.findMany({ where: { patientId }, select: { id: true } });
+      const labRequestIds = labRequests.map(lr => lr.id);
+
+      const referrals = await prisma.referral.findMany({ where: { patientId }, select: { id: true } });
+      const referralIds = referrals.map(ref => ref.id);
+
+      const activityLogs = await prisma.activityLog.findMany({
+        where: {
+          details: {
+            contains: patientId
+          }
+        },
+        select: { id: true }
+      });
+      const activityLogIds = activityLogs.map(al => al.id);
+
+      // Perform everything inside a transaction
+      const counts = await prisma.$transaction(async (tx) => {
+        await tx.activityLog.deleteMany({ where: { id: { in: activityLogIds } } });
+        await tx.doctorQueue.deleteMany({ where: { id: { in: doctorQueueIds } } });
+        await tx.doctorAssignment.deleteMany({ where: { id: { in: doctorAssignmentIds } } });
+        await tx.medicalHistory.deleteMany({ where: { id: { in: medicalHistoryIds } } });
+        await tx.labRequest.deleteMany({ where: { id: { in: labRequestIds } } });
+        await tx.referral.deleteMany({ where: { id: { in: referralIds } } });
+        await tx.billItem.deleteMany({ where: { id: { in: billItemIds } } });
+        await tx.bill.deleteMany({ where: { id: { in: billIds } } });
+        await tx.pharmacyDispensingLog.deleteMany({ where: { id: { in: pharmacyDispensingLogIds } } });
+        await tx.pharmacyQueue.deleteMany({ where: { id: { in: pharmacyQueueIds } } });
+        await tx.prescriptionItem.deleteMany({ where: { id: { in: prescriptionItemIds } } });
+        await tx.prescription.deleteMany({ where: { id: { in: prescriptionIds } } });
+        await tx.consultation.deleteMany({ where: { id: { in: consultationIds } } });
+        await tx.visitRecord.deleteMany({ where: { id: { in: visitRecordIds } } });
+        await tx.appointment.deleteMany({ where: { id: { in: appointmentIds } } });
+        await tx.token.deleteMany({ where: { id: { in: tokenIds } } });
+        await tx.patient.delete({ where: { id: patientId } });
+
+        return {
+          Patient: 1,
+          Appointment: appointmentIds.length,
+          Token: tokenIds.length,
+          DoctorQueue: doctorQueueIds.length,
+          DoctorAssignment: doctorAssignmentIds.length,
+          MedicalHistory: medicalHistoryIds.length,
+          VisitRecord: visitRecordIds.length,
+          Consultation: consultationIds.length,
+          Prescription: prescriptionIds.length,
+          PrescriptionItem: prescriptionItemIds.length,
+          PharmacyQueue: pharmacyQueueIds.length,
+          PharmacyDispensingLog: pharmacyDispensingLogIds.length,
+          Bill: billIds.length,
+          BillItem: billItemIds.length,
+          LabRequest: labRequestIds.length,
+          Referral: referralIds.length,
+          ActivityLog: activityLogIds.length,
+        };
+      });
+
+      // Update in-memory cache versions for related real-time sections
+      cacheVersions.tokens = (cacheVersions.tokens || 1) + 1;
+      cacheVersions.revenue = (cacheVersions.revenue || 1) + 1;
+      cacheVersions.attendance = (cacheVersions.attendance || 1) + 1;
+
+      // Note: The global interceptor middleware will automatically handle
+      // cacheVersions.patients and cacheVersions.system increment since the route has /api/patients
+      // and method is DELETE, and it will broadcast the final SSE event.
+
+      res.json({
+        success: true,
+        message: `Successfully removed patient ${patientId} and all associated records.`,
+        counts
+      });
+    } catch (error: any) {
+      console.error('Error deleting patient:', error);
+      res.status(500).json({ error: 'Failed to safely delete patient record and related data.' });
+    }
+  });
+
   // Appointments & Tokens
   app.post('/api/appointments', authenticateJWT, requireRole(['RECEPTION', 'ADMIN']), async (req, res) => {
     const { patientId, doctorId, date, time, priority } = req.body;
     try {
-      // 1. Check for duplicate active queue entry
-      const existingQueueEntry = await prisma.doctorQueue.findFirst({
-        where: {
-          patientId,
-          doctorId,
-          status: { in: ['WAITING', 'IN_CONSULTATION'] }
-        }
-      });
-
-      if (existingQueueEntry) {
-        return res.status(400).json({ 
-          error: 'Patient is already in the queue for this doctor.',
-          existingTokenId: existingQueueEntry.tokenId
-        });
-      }
-
       // Fetch doctor department to determine token prefix
       const doctorUser = await prisma.user.findUnique({
         where: { id: doctorId }
@@ -3257,6 +3626,22 @@ async function startServer() {
       }
 
       const result = await prisma.$transaction(async (tx) => {
+        // A. Row-level lock on Patient to serialize parallel requests for the same patient and doctor
+        await tx.$executeRaw`SELECT 1 FROM "Patient" WHERE id = ${patientId} FOR UPDATE`;
+
+        // B. Check for duplicate active queue entry inside the transaction after locking
+        const existingQueueEntry = await tx.doctorQueue.findFirst({
+          where: {
+            patientId,
+            doctorId,
+            status: { in: ['WAITING', 'IN_CONSULTATION'] }
+          }
+        });
+
+        if (existingQueueEntry) {
+          throw new Error('DUPLICATE_QUEUE');
+        }
+
         // Generate Token Number like GM-1042
         let tokenNumber = '';
         let isUnique = false;
@@ -3312,8 +3697,11 @@ async function startServer() {
         return { appointment, token, queueEntry, visit };
       });
       res.json(result);
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
+      if (error.message === 'DUPLICATE_QUEUE') {
+        return res.status(400).json({ error: 'Patient is already in the queue for this doctor.' });
+      }
       res.status(500).json({ error: 'Failed to create appointment' });
     }
   });
@@ -4428,14 +4816,26 @@ async function startServer() {
         } else if (status === 'pending') {
           whereClause.status = 'UNPAID';
         } else if (status === 'flagged') {
-          whereClause.status = 'FLAGGED';
+          whereClause.AND = whereClause.AND || [];
+          whereClause.AND.push({
+            OR: [
+              { status: 'FLAGGED' },
+              {
+                items: {
+                  some: {
+                    name: { contains: 'OXYCODONE', mode: 'insensitive' }
+                  }
+                }
+              }
+            ]
+          });
         }
       }
 
       if (search && String(search).trim()) {
         const s = String(search).trim();
-        whereClause.AND = [
-          {
+        whereClause.AND = whereClause.AND || [];
+        whereClause.AND.push({
             OR: [
               { id: { contains: s, mode: 'insensitive' } },
               { tokenNumber: { contains: s, mode: 'insensitive' } },
@@ -4453,8 +4853,7 @@ async function startServer() {
                 }
               }
             ]
-          }
-        ];
+          });
       }
 
       const selectClause = {
@@ -4537,6 +4936,89 @@ async function startServer() {
 
   app.get('/api/export/bills', authenticateJWT, requireRole(['PHARMACY', 'ADMIN', 'DOCTOR', 'RECEPTION']), async (req: any, res: any) => {
     try {
+      const { startDate, endDate, status, search, patientId, medication } = req.query;
+      
+      const whereClause: any = {};
+      if (patientId) {
+        whereClause.patientId = String(patientId);
+      }
+      if (startDate || endDate) {
+        whereClause.createdAt = {};
+        if (startDate) {
+          const start = new Date(String(startDate));
+          start.setHours(0, 0, 0, 0);
+          whereClause.createdAt.gte = start;
+        }
+        if (endDate) {
+          const end = new Date(String(endDate));
+          end.setHours(23, 59, 59, 999);
+          whereClause.createdAt.lte = end;
+        }
+      }
+
+      if (status && status !== 'all') {
+        if (status === 'completed') {
+          whereClause.status = 'PAID';
+        } else if (status === 'pending') {
+          whereClause.status = 'UNPAID';
+        }
+      }
+
+      // Handle flagged status and medication filter exactly like the frontend
+      let andConditions: any[] = [];
+
+      if (status === 'flagged') {
+        andConditions.push({
+          OR: [
+            { status: 'FLAGGED' },
+            {
+              items: {
+                some: {
+                  name: { contains: 'OXYCODONE', mode: 'insensitive' }
+                }
+              }
+            }
+          ]
+        });
+      }
+
+      if (medication && medication !== 'All Medications') {
+        andConditions.push({
+          items: {
+            some: {
+              name: String(medication)
+            }
+          }
+        });
+      }
+
+      if (search && String(search).trim()) {
+        const s = String(search).trim();
+        andConditions.push({
+          OR: [
+            { id: { contains: s, mode: 'insensitive' } },
+            { tokenNumber: { contains: s, mode: 'insensitive' } },
+            { patientId: { contains: s, mode: 'insensitive' } },
+            {
+              patient: {
+                name: { contains: s, mode: 'insensitive' }
+              }
+            },
+            {
+              items: {
+                some: {
+                  name: { contains: s, mode: 'insensitive' }
+                }
+              }
+            }
+          ]
+        });
+      }
+
+      if (andConditions.length > 0) {
+        whereClause.AND = andConditions;
+      }
+
       const includeClause = {
         patient: {
           select: {
@@ -4599,6 +5081,7 @@ async function startServer() {
 
       while (hasMore) {
         const batch = await prisma.bill.findMany({
+          where: whereClause,
           include: includeClause,
           orderBy: { createdAt: 'desc' },
           skip: skip,
@@ -5950,9 +6433,65 @@ async function startServer() {
     }
   });
 
-  app.listen(Number(PORT), '0.0.0.0', () => {
+  const server = app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT} [${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}]`);
   });
+
+  // Graceful shutdown handling
+  let isShuttingDown = false;
+
+  const handleShutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    console.log(`\n[SHUTDOWN] Received ${signal}. Starting graceful shutdown sequence...`);
+
+    // 1. Stop accepting new HTTP requests and allow active requests to complete
+    console.log('[SHUTDOWN] Closing HTTP server...');
+    server.close((err) => {
+      if (err) {
+        console.error('[SHUTDOWN] Error closing HTTP server:', err);
+      } else {
+        console.log('[SHUTDOWN] HTTP server closed successfully.');
+      }
+    });
+
+    // 2. Close active SSE clients cleanly
+    console.log(`[SHUTDOWN] Closing ${sseClients.size} active SSE connections...`);
+    for (const client of sseClients) {
+      try {
+        client.write(`data: ${JSON.stringify({ type: 'shutdown', message: 'Server is undergoing graceful shutdown.' })}\n\n`);
+        if (client.intervalId) {
+          clearInterval(client.intervalId);
+        }
+        client.end();
+      } catch (err) {
+        // Ignored
+      }
+    }
+    sseClients.clear();
+
+    // 3. Clear global background timers
+    console.log('[SHUTDOWN] Clearing global background timers...');
+    if (typeof doctorShiftInterval !== 'undefined') {
+      clearInterval(doctorShiftInterval);
+    }
+
+    // 4. Disconnect Prisma client safely
+    console.log('[SHUTDOWN] Disconnecting Prisma client...');
+    try {
+      await prisma.$disconnect();
+      console.log('[SHUTDOWN] Prisma disconnected successfully.');
+    } catch (err) {
+      console.error('[SHUTDOWN] Error disconnecting Prisma:', err);
+    }
+
+    console.log('[SHUTDOWN] Graceful shutdown completed. Exiting process.');
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => handleShutdown('SIGINT'));
+  process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 }
 
 async function seedInitialData() {
@@ -6002,64 +6541,29 @@ async function seedInitialData() {
         }
       }
 
-      // Dynamic Auto-healing Migration Script for Employee ID Standardization
-      console.log('[AUDIT] Running Personnel Registry Security & Employee ID Standardization Audit...');
-      const allDbUsers = await prisma.user.findMany();
-      const usedEmployeeIds = new Set<string>();
-
-      for (const u of allDbUsers) {
-        if (u.employeeId && u.employeeId.trim() && u.employeeId.trim().toUpperCase() !== 'N/A') {
-          usedEmployeeIds.add(u.employeeId.trim().toUpperCase());
-        }
-      }
-
-      const prefixMap: Record<string, string> = {
-        'ADMIN': 'ADM',
-        'DOCTOR': 'DOC',
-        'RECEPTION': 'REC',
-        'PHARMACY': 'PHR'
-      };
-
-      for (const u of allDbUsers) {
-        const isMissingId = !u.employeeId || !u.employeeId.trim() || u.employeeId.trim().toUpperCase() === 'N/A';
-        if (isMissingId) {
-          const role = (u.role || 'DOCTOR').toUpperCase();
-          const prefix = prefixMap[role] || 'EMP';
-          
-          let sequenceNum = 1001;
-          let candidateId = `${prefix}-${sequenceNum}`;
-          
-          while (usedEmployeeIds.has(candidateId.toUpperCase())) {
-            sequenceNum++;
-            candidateId = `${prefix}-${sequenceNum}`;
-          }
-          
-          usedEmployeeIds.add(candidateId.toUpperCase());
-          
-          await prisma.user.update({
-            where: { id: u.id },
-            data: { employeeId: candidateId }
-          });
-          console.log(`[AUDIT] Assigned unique standard Employee ID "${candidateId}" to user "${u.name}" (${role})`);
-        }
-      }
-
-      // Optional: Cleanup corrupted data (e.g. duplicate or orphan tokens without doctorQueue)
-      // For this extreme fix, we'll ensure every active token has a corresponding DoctorQueue entry
-      const tokensWithoutQueue = await prisma.token.findMany({
-        where: { 
-          doctorQueue: null,
-          status: { not: 'CANCELLED' } 
-        }
-      });
-
-      for (const t of tokensWithoutQueue) {
-        // If it's a valid token, we can try to find or create a queue entry, 
-        // but better to just mark them as cancelled or delete them if they are test junk
-        await prisma.token.update({
-          where: { id: t.id },
-          data: { status: 'CANCELLED' }
+      // Seed departments if empty
+      const deptsCount = await prisma.department.count();
+      if (deptsCount === 0) {
+        const defaultDepartments = [
+          'Cardiology',
+          'General Medicine',
+          'Pediatrics',
+          'Orthopedics',
+          'Pharmacy',
+          'Reception',
+          'Laboratory',
+          'Billing',
+          'Administration',
+          'Oncology',
+          'Neurology',
+          'Emergency',
+          'Diagnostics'
+        ];
+        await prisma.department.createMany({
+          data: defaultDepartments.map(name => ({ name })),
+          skipDuplicates: true
         });
+        console.log('[SEED] Seeded default departments.');
       }
 
       // Seed suppliers if empty
@@ -6246,54 +6750,7 @@ async function seedInitialData() {
         }
       }
 
-      // Dynamic pricing self-healing migration logic for existing items/user-made items
-      console.log('[AUDIT] Performing dynamic self-healing audit on inventory prices...');
-      const itemsToHeal = await prisma.inventoryItem.findMany();
-      for (const item of itemsToHeal) {
-        if (!item.sellingPrice || item.sellingPrice <= 0) {
-          let newSellingPrice = 15.0;
-          let newPurchasePrice = 10.0;
-          const nameLower = (item.name || '').toLowerCase();
-          
-          if (nameLower.includes('paracetamol')) {
-            newSellingPrice = 5.0;
-            newPurchasePrice = 4.0;
-          } else if (nameLower.includes('amoxicillin')) {
-            newSellingPrice = 8.9;
-            newPurchasePrice = 7.0;
-          } else if (nameLower.includes('syringe')) {
-            newSellingPrice = 15.0;
-            newPurchasePrice = 12.0;
-          } else if (nameLower.includes('ibuprofen')) {
-            newSellingPrice = 6.0;
-            newPurchasePrice = 5.0;
-          } else if (nameLower.includes('saline') || nameLower.includes('water')) {
-            newSellingPrice = 25.0;
-            newPurchasePrice = 20.0;
-          } else if (nameLower.includes('insulin')) {
-            newSellingPrice = 120.0;
-            newPurchasePrice = 100.0;
-          } else if (nameLower.includes('aspirin')) {
-            newSellingPrice = 4.5;
-            newPurchasePrice = 3.5;
-          } else if (nameLower.includes('glove')) {
-            newSellingPrice = 18.0;
-            newPurchasePrice = 9.0;
-          } else if (nameLower.includes('ors') || nameLower.includes('rehydration')) {
-            newSellingPrice = 2.5;
-            newPurchasePrice = 1.1;
-          }
-          
-          await prisma.inventoryItem.update({
-            where: { id: item.id },
-            data: {
-              sellingPrice: newSellingPrice,
-              purchasePrice: newPurchasePrice
-            }
-          });
-          console.log(`[AUDIT] Self-healed empty/0 price of "${item.name}" to Selling: ₹${newSellingPrice}, Purchase: ₹${newPurchasePrice}`);
-        }
-      }
+
     });
     console.log('[SEED] Web Application clinical seeding and checkups completed successfully.');
   } catch (err: any) {
