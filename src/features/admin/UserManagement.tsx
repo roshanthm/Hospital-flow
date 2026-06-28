@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { useStore, authFetch } from '@/src/store/useStore';
@@ -760,54 +760,59 @@ export default function UserManagement() {
   };
 
   // Dual filtering combining: Active Tab Selection, Search Terms, and Advanced Filters Dropdowns
-  const filteredUsers = (users || []).filter(u => {
-    const matchesSearch = u.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          (u.email && u.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
-                          (u.employeeId && u.employeeId.toLowerCase().includes(searchTerm.toLowerCase())) ||
-                          (u.designation && u.designation.toLowerCase().includes(searchTerm.toLowerCase()));
-    
-    // Tab filtering
-    const matchesTab = activeTab === 'ALL' || u.role === activeTab;
-    
-    // Role filter dropdown
-    const matchesRole = filterRole === 'ALL' || u.role === filterRole;
+  const filteredUsers = useMemo(() => {
+    return (users || []).filter(u => {
+      const matchesSearch = u.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                            (u.email && u.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                            (u.employeeId && u.employeeId.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                            (u.designation && u.designation.toLowerCase().includes(searchTerm.toLowerCase()));
+      
+      // Tab filtering
+      const matchesTab = activeTab === 'ALL' || u.role === activeTab;
+      
+      // Role filter dropdown
+      const matchesRole = filterRole === 'ALL' || u.role === filterRole;
 
-    // Department filter dropdown
-    const matchesDept = filterDept === 'ALL' || u.department === filterDept;
+      // Department filter dropdown
+      const matchesDept = filterDept === 'ALL' || u.department === filterDept;
 
-    // Status filter dropdown
-    let matchesStatus = true;
-    if (filterStatus !== 'ALL') {
-      if (filterStatus === 'ACTIVE') {
-        if (u.role === 'DOCTOR') {
+      // Status filter dropdown
+      let matchesStatus = true;
+      if (filterStatus !== 'ALL') {
+        if (filterStatus === 'ACTIVE') {
+          if (u.role === 'DOCTOR') {
+            matchesStatus = u.dutyStatus === 'ON DUTY' || u.dutyStatus === 'ON_DUTY';
+          } else {
+            matchesStatus = u.employmentStatus === 'ACTIVE' || !!u.isActive;
+          }
+        } else if (filterStatus === 'INACTIVE') {
+          if (u.role === 'DOCTOR') {
+            matchesStatus = u.dutyStatus !== 'ON DUTY' && u.dutyStatus !== 'ON_DUTY';
+          } else {
+            matchesStatus = u.employmentStatus === 'INACTIVE' || !u.isActive;
+          }
+        } else if (filterStatus === 'ON_DUTY') {
           matchesStatus = u.dutyStatus === 'ON DUTY' || u.dutyStatus === 'ON_DUTY';
-        } else {
-          matchesStatus = u.employmentStatus === 'ACTIVE' || !!u.isActive;
         }
-      } else if (filterStatus === 'INACTIVE') {
-        if (u.role === 'DOCTOR') {
-          matchesStatus = u.dutyStatus !== 'ON DUTY' && u.dutyStatus !== 'ON_DUTY';
-        } else {
-          matchesStatus = u.employmentStatus === 'INACTIVE' || !u.isActive;
-        }
-      } else if (filterStatus === 'ON_DUTY') {
-        matchesStatus = u.dutyStatus === 'ON DUTY' || u.dutyStatus === 'ON_DUTY';
       }
-    }
 
-    return matchesSearch && matchesTab && matchesRole && matchesDept && matchesStatus;
-  });
+      return matchesSearch && matchesTab && matchesRole && matchesDept && matchesStatus;
+    });
+  }, [users, searchTerm, activeTab, filterRole, filterDept, filterStatus]);
 
   // Calculate live statistical counters directly from actual Neon PostgreSQL models
   const totalStaffCount = (users || []).length;
-  const activeStaffCount = (users || []).filter(u => {
-    if (u.role === 'DOCTOR') {
-      return u.dutyStatus === 'ON DUTY' || u.dutyStatus === 'ON_DUTY';
-    }
-    return u.employmentStatus === 'ACTIVE' || !!u.isActive;
-  }).length;
-  const doctorsCount = (users || []).filter(u => u.role === 'DOCTOR').length;
-  const receptionCount = (users || []).filter(u => u.role === 'RECEPTION').length;
+  const activeStaffCount = useMemo(() => {
+    return (users || []).filter(u => {
+      if (u.role === 'DOCTOR') {
+        return u.dutyStatus === 'ON DUTY' || u.dutyStatus === 'ON_DUTY';
+      }
+      return u.employmentStatus === 'ACTIVE' || !!u.isActive;
+    }).length;
+  }, [users]);
+  
+  const doctorsCount = useMemo(() => (users || []).filter(u => u.role === 'DOCTOR').length, [users]);
+  const receptionCount = useMemo(() => (users || []).filter(u => u.role === 'RECEPTION').length, [users]);
   const pharmacyCount = (users || []).filter(u => u.role === 'PHARMACY').length;
   const departmentsCount = (departments || []).length;
 

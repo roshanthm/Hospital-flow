@@ -1316,6 +1316,14 @@ export const useStore = create<HospitalState>()(
     }),
     {
       name: 'hospital-storage',
+      partialize: (state) => ({
+        ...state,
+        currentUser: state.currentUser ? {
+          ...state.currentUser,
+          accessToken: undefined,
+          refreshToken: undefined,
+        } : null,
+      }),
     }
   )
 );

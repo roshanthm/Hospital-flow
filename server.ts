@@ -1262,6 +1262,13 @@ async function startServer() {
 
   app.get('/api/admin/password-reset-requests', authenticateJWT, requireRole(['ADMIN']), async (req, res) => {
     try {
+      if (req.query.countOnly === 'true') {
+        const count = await prisma.passwordResetRequest.count({
+          where: { status: 'PENDING' }
+        });
+        return res.json({ count });
+      }
+
       const requests = await prisma.passwordResetRequest.findMany({
         where: { status: 'PENDING' },
         orderBy: { requestTime: 'desc' }
@@ -3141,6 +3148,87 @@ async function startServer() {
     }
   });
 
+  // --- PHI Sanitization Helpers ---
+  function sanitizePatientPHI(patient: any, role: string) {
+    if (!patient) return patient;
+    if (role === 'RECEPTION' || role === 'PHARMACY') {
+      const { medicalHistory, chronicConditions, allergies, bloodPressure, weight, temperature, ...safePatient } = patient;
+      
+      if (safePatient.consultations && Array.isArray(safePatient.consultations)) {
+        safePatient.consultations = safePatient.consultations.map((c: any) => sanitizeConsultationPHI(c, role));
+      }
+      
+      if (safePatient.tokens && Array.isArray(safePatient.tokens)) {
+        safePatient.tokens = safePatient.tokens.map((t: any) => sanitizeTokenPHI(t, role));
+      }
+      
+      return safePatient;
+    }
+    return patient;
+  }
+
+  function sanitizeConsultationPHI(consultation: any, role: string) {
+    if (!consultation) return consultation;
+    if (role === 'RECEPTION' || role === 'PHARMACY') {
+      const { notes, diagnosis, symptoms, chiefComplaint, vitals, followUp, referrals, labRequests, ...safeConsultation } = consultation;
+      
+      if (role === 'RECEPTION') {
+        delete safeConsultation.prescription;
+      }
+      
+      if (role === 'PHARMACY') {
+        delete safeConsultation.doctorId;
+        if (safeConsultation.prescription) {
+          delete safeConsultation.prescription.doctorId;
+        }
+      }
+      
+      if (safeConsultation.visitRecord && safeConsultation.visitRecord.token) {
+        safeConsultation.visitRecord.token = sanitizeTokenPHI(safeConsultation.visitRecord.token, role);
+      }
+      
+      return safeConsultation;
+    }
+    return consultation;
+  }
+
+  function sanitizeTokenPHI(token: any, role: string) {
+    if (!token) return token;
+    if (role === 'PHARMACY') {
+      const { priority, doctorId, ...safeToken } = token;
+      if (safeToken.patient) {
+        safeToken.patient = sanitizePatientPHI(safeToken.patient, role);
+      }
+      if (safeToken.doctor) {
+        delete safeToken.doctor.id;
+      }
+      return safeToken;
+    }
+    return token;
+  }
+
+  function sanitizePharmacyQueuePHI(queueItem: any, role: string) {
+    if (!queueItem || role !== 'PHARMACY') return queueItem;
+    if (queueItem.prescription) {
+      delete queueItem.prescription.doctorId;
+      if (queueItem.prescription.patient) {
+        queueItem.prescription.patient = sanitizePatientPHI(queueItem.prescription.patient, role);
+      }
+      if (queueItem.prescription.consultation) {
+        queueItem.prescription.consultation = sanitizeConsultationPHI(queueItem.prescription.consultation, role);
+      }
+    }
+    return queueItem;
+  }
+
+  function sanitizeBillPHI(bill: any, role: string) {
+    if (!bill || role !== 'PHARMACY') return bill;
+    if (bill.dispensingLog && bill.dispensingLog.pharmacyQueue) {
+      bill.dispensingLog.pharmacyQueue = sanitizePharmacyQueuePHI(bill.dispensingLog.pharmacyQueue, role);
+    }
+    return bill;
+  }
+
   // Patients
   app.get('/api/patients', authenticateJWT, requireRole(['RECEPTION', 'DOCTOR', 'PHARMACY', 'ADMIN']), async (req: any, res: any) => {
     const { search, page, limit, dateFilter, startDate, endDate } = req.query;
@@ -3226,8 +3314,11 @@ async function startServer() {
             take: limitNum
           })
         ]);
+        
+        const sanitizedData = data.map((p: any) => sanitizePatientPHI(p, req.user.role));
+        
         return res.json({
-          data,
+          data: sanitizedData,
           page: pageNum,
           limit: limitNum,
           total,
@@ -3243,7 +3334,9 @@ async function startServer() {
         },
         take: 100
       });
-      res.json(patients);
+      
+      const sanitizedPatients = patients.map((p: any) => sanitizePatientPHI(p, req.user.role));
+      res.json(sanitizedPatients);
     } catch (error) {
       console.error('Error fetching patients:', error);
       res.status(500).json({ error: 'Failed to fetch patients' });
@@ -3311,7 +3404,8 @@ async function startServer() {
           } else {
             isFirst = false;
           }
-          res.write(JSON.stringify(item));
+          const sanitizedItem = sanitizePatientPHI(item, req.user.role);
+          res.write(JSON.stringify(sanitizedItem));
         }
 
         skip += batch.length;
@@ -3369,7 +3463,7 @@ async function startServer() {
         return res.status(404).json({ error: 'Patient not found' });
       }
 
-      res.json(patient);
+      res.json(sanitizePatientPHI(patient, req.user.role));
     } catch (error) {
       console.error('Error fetching patient:', error);
       res.status(500).json({ error: 'Failed to fetch patient' });
@@ -3793,7 +3887,7 @@ async function startServer() {
 
       const mapToken = (t: any) => {
         const d = doctorsList.find((doc: any) => doc.id === t.doctorId);
-        return {
+        const mapped = {
           id: t.id,
           tokenNumber: t.tokenNumber,
           status: t.status,
@@ -3814,6 +3908,7 @@ async function startServer() {
           } : null,
           visitRecord: t.visitRecord
         };
+        return sanitizeTokenPHI(mapped, req.user.role);
       };
 
       if (pageNum && limitNum) {
@@ -4001,7 +4096,8 @@ async function startServer() {
           } else {
             isFirst = false;
           }
-          res.write(JSON.stringify(item));
+          const sanitizedItem = sanitizeTokenPHI(item, req.user.role);
+          res.write(JSON.stringify(sanitizedItem));
         }
 
         skip += batch.length;
@@ -4394,7 +4490,7 @@ async function startServer() {
           })
         ]);
         return res.json({
-          data,
+          data: data.map((c: any) => sanitizeConsultationPHI(c, (req as any).user?.role)),
           page: pageNum,
           limit: limitNum,
           total,
@@ -4407,7 +4503,7 @@ async function startServer() {
         include: includeClause,
         orderBy: { createdAt: 'desc' }
       });
-      res.json(history);
+      res.json(history.map((c: any) => sanitizeConsultationPHI(c, (req as any).user?.role)));
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch history' });
     }
@@ -4550,7 +4646,7 @@ async function startServer() {
         },
         orderBy: { createdAt: 'asc' }
       });
-      res.json(queue);
+      res.json(queue.map((q: any) => sanitizePharmacyQueuePHI(q, (req as any).user.role)));
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch pharmacy queue' });
     }
@@ -4617,8 +4713,16 @@ async function startServer() {
             take: limitNum
           })
         ]);
+        
+        const sanitizedData = data.map((log: any) => {
+          if (log.pharmacyQueue) {
+            log.pharmacyQueue = sanitizePharmacyQueuePHI(log.pharmacyQueue, (req as any).user.role);
+          }
+          return log;
+        });
+
         return res.json({
-          data,
+          data: sanitizedData,
           page: pageNum,
           limit: limitNum,
           total,
@@ -4632,7 +4736,15 @@ async function startServer() {
         orderBy: { dispensedAt: 'desc' },
         take: 1000
       });
-      res.json(logs);
+      
+      const sanitizedLogs = logs.map((log: any) => {
+        if (log.pharmacyQueue) {
+          log.pharmacyQueue = sanitizePharmacyQueuePHI(log.pharmacyQueue, (req as any).user.role);
+        }
+        return log;
+      });
+      
+      res.json(sanitizedLogs);
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch pharmacy history' });
     }
@@ -5099,7 +5211,8 @@ async function startServer() {
           } else {
             isFirst = false;
           }
-          res.write(JSON.stringify(item));
+          const sanitizedItem = sanitizeBillPHI(item, req.user.role);
+          res.write(JSON.stringify(sanitizedItem));
         }
 
         skip += batch.length;
@@ -6283,24 +6396,30 @@ async function startServer() {
         take: 10
       });
 
-      const consultations = await prisma.consultation.findMany({
-        where: {
-          OR: [
-            { id: { contains: q, mode: 'insensitive' } },
-            { diagnosis: { contains: q, mode: 'insensitive' } },
-            { notes: { contains: q, mode: 'insensitive' } },
-            { patient: { name: { contains: q, mode: 'insensitive' } } },
-            { doctor: { name: { contains: q, mode: 'insensitive' } } }
-          ]
-        },
-        include: {
-          patient: true,
-          doctor: true
-        },
-        take: 10
-      });
+      let consultations: any[] = [];
+      if (req.user.role === 'DOCTOR' || req.user.role === 'ADMIN') {
+        consultations = await prisma.consultation.findMany({
+          where: {
+            OR: [
+              { id: { contains: q, mode: 'insensitive' } },
+              { diagnosis: { contains: q, mode: 'insensitive' } },
+              { notes: { contains: q, mode: 'insensitive' } },
+              { patient: { name: { contains: q, mode: 'insensitive' } } },
+              { doctor: { name: { contains: q, mode: 'insensitive' } } }
+            ]
+          },
+          include: {
+            patient: true,
+            doctor: true
+          },
+          take: 10
+        });
+      }
 
-      res.json({ patients, tokens, consultations });
+      const sanitizedPatients = patients.map((p: any) => sanitizePatientPHI(p, req.user.role));
+      const sanitizedTokens = tokens.map((t: any) => sanitizeTokenPHI(t, req.user.role));
+
+      res.json({ patients: sanitizedPatients, tokens: sanitizedTokens, consultations });
     } catch (error) {
       console.error('Search error:', error);
       res.status(500).json({ error: 'Search failed' });

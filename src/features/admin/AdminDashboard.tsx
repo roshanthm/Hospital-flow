@@ -4,7 +4,7 @@
  */
 
 import { motion } from "motion/react";
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useStore, authFetch, getClientCachedJSON, clearClientCache } from "@/src/store/useStore";
 import { 
@@ -61,23 +61,6 @@ const getFilterDates = (filter: string, startInput?: string, endInput?: string) 
 };
 
 export default function AdminDashboard() {
-  const users = useStore(state => state.users);
-  const patients = useStore(state => state.patients);
-  const appointments = useStore(state => state.appointments);
-  const activityLogs = useStore(state => state.activityLogs);
-  const tokens = useStore(state => state.tokens);
-  const prescriptions = useStore(state => state.prescriptions);
-  const bills = useStore(state => state.bills);
-
-  const fetchUsers = useStore(state => state.fetchUsers);
-  const fetchPatients = useStore(state => state.fetchPatients);
-  const fetchTokens = useStore(state => state.fetchTokens);
-  const fetchPharmacyQueue = useStore(state => state.fetchPharmacyQueue);
-  const fetchBills = useStore(state => state.fetchBills);
-  const fetchActivityLogs = useStore(state => state.fetchActivityLogs);
-
-  const [consultations, setConsultations] = useState<any[]>([]);
-  
   const [timeFilter, setTimeFilter] = useState<'30days' | '24h' | '7days'>(() => {
     return (sessionStorage.getItem('admin_timeFilter') as any) || '30days';
   });
@@ -242,12 +225,7 @@ export default function AdminDashboard() {
   const [summaryData, setSummaryData] = useState<any>(() => {
     return getClientCachedJSON(`/api/admin/operational-summary?timeFilter=${timeFilter}`);
   });
-  const [isSummaryLoading, setIsSummaryLoading] = useState(() => {
-    return !getClientCachedJSON(`/api/admin/operational-summary?timeFilter=${timeFilter}`);
-  });
-
   const fetchSummary = useCallback(async (silent = false) => {
-    if (!silent) setIsSummaryLoading(true);
     try {
       const res = await authFetch(`/api/admin/operational-summary?timeFilter=${timeFilter}`);
       if (res.ok) {
@@ -259,8 +237,6 @@ export default function AdminDashboard() {
       }
     } catch (e) {
       console.error("Failed to load operational summary:", e);
-    } finally {
-      if (!silent) setIsSummaryLoading(false);
     }
   }, [timeFilter]);
 
@@ -288,10 +264,10 @@ export default function AdminDashboard() {
     // Fetch password reset requests to show alerts in real-time
     const loadResetRequests = async () => {
       try {
-        const res = await authFetch('/api/admin/password-reset-requests');
+        const res = await authFetch('/api/admin/password-reset-requests?countOnly=true');
         if (res.ok) {
           const data = await res.json();
-          setPendingResetsCount(data.length);
+          setPendingResetsCount(data.count);
         }
       } catch (e) {
         console.error("Failed to load password reset requests for dashboard:", e);
@@ -319,10 +295,49 @@ export default function AdminDashboard() {
   const activeTokensCount = summaryData?.activeTokensCount ?? 0;
   const prescriptionsDispensedCount = summaryData?.prescriptionsDispensedCount ?? 0;
   
-  const chartData = summaryData?.chartData ?? [];
+  const chartData = useMemo(() => summaryData?.chartData ?? [], [summaryData]);
   const unifiedLogsList = summaryData?.unifiedLogsList ?? [];
   const emergencyRegistryItems = summaryData?.emergencyRegistryItems ?? [];
   const activeTransactions = summaryData?.activeTransactions ?? [];
+
+  const filteredAttendanceRows = useMemo(() => {
+    return (attendanceRows || []).filter((r) => {
+      const matchesSearch = 
+        (r.doctorName || '').toLowerCase().includes(attendanceSearchTerm.toLowerCase()) ||
+        (r.department || '').toLowerCase().includes(attendanceSearchTerm.toLowerCase());
+      if (!matchesSearch) return false;
+
+      let startStr = '';
+      let endStr = '';
+      const todayLocalDate = formatLocalDate(new Date());
+
+      if (attendanceFilter === 'today') {
+        startStr = todayLocalDate;
+        endStr = todayLocalDate;
+      } else if (attendanceFilter === 'yesterday') {
+        const yes = new Date();
+        yes.setDate(yes.getDate() - 1);
+        const yesStr = formatLocalDate(yes);
+        startStr = yesStr;
+        endStr = yesStr;
+      } else if (attendanceFilter === '7days') {
+        const s = new Date();
+        s.setDate(s.getDate() - 6);
+        startStr = formatLocalDate(s);
+        endStr = todayLocalDate;
+      } else if (attendanceFilter === '30days') {
+        const s = new Date();
+        s.setDate(s.getDate() - 29);
+        startStr = formatLocalDate(s);
+        endStr = todayLocalDate;
+      } else if (attendanceFilter === 'custom') {
+        startStr = attStartInput;
+        endStr = attEndInput;
+      }
+
+      return r.date >= startStr && r.date <= endStr;
+    });
+  }, [attendanceRows, attendanceSearchTerm, attendanceFilter, attStartInput, attEndInput]);
 
   const getPharmacistName = (pharmacistId: string | null) => {
     return 'System Pharmacist';
@@ -654,10 +669,10 @@ export default function AdminDashboard() {
         fetchAttendance(true),
         fetchSummary(true),
         (async () => {
-          const res = await authFetch('/api/admin/password-reset-requests');
+          const res = await authFetch('/api/admin/password-reset-requests?countOnly=true');
           if (res.ok) {
             const data = await res.json();
-            setPendingResetsCount(data.length);
+            setPendingResetsCount(data.count);
           }
         })()
       ]);
@@ -1149,42 +1164,19 @@ export default function AdminDashboard() {
               Analyzing medical registry entries...
             </div>
           ) : (() => {
-            const filteredRows = (attendanceRows || []).filter((r) => {
-              const matchesSearch = 
-                (r.doctorName || '').toLowerCase().includes(attendanceSearchTerm.toLowerCase()) ||
-                (r.department || '').toLowerCase().includes(attendanceSearchTerm.toLowerCase());
-              if (!matchesSearch) return false;
-
-              let startStr = '';
-              let endStr = '';
-              const todayLocalDate = formatLocalDate(new Date());
-
-              if (attendanceFilter === 'today') {
-                startStr = todayLocalDate;
-                endStr = todayLocalDate;
-              } else if (attendanceFilter === 'yesterday') {
-                const yes = new Date();
-                yes.setDate(yes.getDate() - 1);
-                const yesStr = formatLocalDate(yes);
-                startStr = yesStr;
-                endStr = yesStr;
-              } else if (attendanceFilter === '7days') {
-                const s = new Date();
-                s.setDate(s.getDate() - 6);
-                startStr = formatLocalDate(s);
-                endStr = todayLocalDate;
-              } else if (attendanceFilter === '30days') {
-                const s = new Date();
-                s.setDate(s.getDate() - 29);
-                startStr = formatLocalDate(s);
-                endStr = todayLocalDate;
-              } else if (attendanceFilter === 'custom') {
-                startStr = attStartInput;
-                endStr = attEndInput;
-              }
-
-              return r.date >= startStr && r.date <= endStr;
-            });
+            if (filteredAttendanceRows.length === 0) {
+              return (
+                <div className="p-12 text-center">
+                  <div className="w-16 h-16 rounded-full bg-slate-50 flex items-center justify-center mx-auto mb-4 border border-slate-100 shadow-inner">
+                    <UserX size={24} className="text-slate-300" />
+                  </div>
+                  <h3 className="text-sm font-bold text-slate-700 mb-1">No Registry Data Found</h3>
+                  <p className="text-xs text-slate-500 max-w-xs mx-auto">
+                    There are no medical staff attendance records matching your search or filter range.
+                  </p>
+                </div>
+              );
+            }
 
             const formatFullTime = (dateInput: any) => {
               if (!dateInput) return '--';
@@ -1204,7 +1196,7 @@ export default function AdminDashboard() {
             const groupedDoctors = (() => {
               const map: { [id: string]: { doctorId: string; doctorName: string; department: string; employeeId: string; history: any[] } } = {};
               
-              filteredRows.forEach((row) => {
+              filteredAttendanceRows.forEach((row) => {
                 const docId = row.doctorId || 'unknown-doc';
                 if (!map[docId]) {
                   map[docId] = {
