@@ -5643,43 +5643,47 @@ async function startServer() {
       const safeMaxThreshold = isNaN(parsedMax) ? 100 : parsedMax;
       const safeReorderLevel = isNaN(parsedReorder) ? 20 : parsedReorder;
 
-      const item = await prisma.inventoryItem.create({
-        data: {
-          itemCode: cleanItemCode,
-          name,
-          genericName: genericName || '',
-          brandName: brandName || '',
-          category: category || 'General',
-          type: type || 'MEDICINE',
-          dosage: dosage || '',
-          unit: unit || 'Box',
-          batchNumber: batchNumber || `BCH-${Math.floor(1000 + Math.random() * 9000)}`,
-          expiryDate: expiryDate ? new Date(expiryDate) : null,
-          supplierId: supplierId || null,
-          purchasePrice: safePurchasePrice,
-          sellingPrice: safeSellingPrice,
-          stockQuantity: safeStockQuantity,
-          minThreshold: safeMinThreshold,
-          maxThreshold: safeMaxThreshold,
-          reorderLevel: safeReorderLevel,
-          status: status || 'ACTIVE',
-          shelfLocation: cleanShelfLocation
-        },
-        include: { supplier: true }
-      });
-
-      // Log STOCK_IN transaction initially if quantity > 0
-      if (safeStockQuantity > 0) {
-        await prisma.inventoryTransaction.create({
+      const item = await prisma.$transaction(async (tx) => {
+        const createdItem = await tx.inventoryItem.create({
           data: {
-            inventoryItemId: item.id,
-            type: 'STOCK_IN',
-            quantity: safeStockQuantity,
-            performedBy: String(user),
-            referenceId: 'INITIAL_STOCK'
-          }
+            itemCode: cleanItemCode,
+            name,
+            genericName: genericName || '',
+            brandName: brandName || '',
+            category: category || 'General',
+            type: type || 'MEDICINE',
+            dosage: dosage || '',
+            unit: unit || 'Box',
+            batchNumber: batchNumber || `BCH-${Math.floor(1000 + Math.random() * 9000)}`,
+            expiryDate: expiryDate ? new Date(expiryDate) : null,
+            supplierId: supplierId || null,
+            purchasePrice: safePurchasePrice,
+            sellingPrice: safeSellingPrice,
+            stockQuantity: safeStockQuantity,
+            minThreshold: safeMinThreshold,
+            maxThreshold: safeMaxThreshold,
+            reorderLevel: safeReorderLevel,
+            status: status || 'ACTIVE',
+            shelfLocation: cleanShelfLocation
+          },
+          include: { supplier: true }
         });
-      }
+
+        // Log STOCK_IN transaction initially if quantity > 0
+        if (safeStockQuantity > 0) {
+          await tx.inventoryTransaction.create({
+            data: {
+              inventoryItemId: createdItem.id,
+              type: 'STOCK_IN',
+              quantity: safeStockQuantity,
+              performedBy: String(user),
+              referenceId: 'INITIAL_STOCK'
+            }
+          });
+        }
+        
+        return createdItem;
+      });
 
       res.json(item);
     } catch (error: any) {
@@ -5827,45 +5831,49 @@ async function startServer() {
       const safeMaxThreshold = parsedMax !== undefined && !isNaN(parsedMax) ? parsedMax : undefined;
       const safeReorderLevel = parsedReorder !== undefined && !isNaN(parsedReorder) ? parsedReorder : undefined;
 
-      const item = await prisma.inventoryItem.update({
-        where: { id: req.params.id },
-        data: {
-          itemCode,
-          name,
-          genericName,
-          brandName,
-          category,
-          type,
-          dosage,
-          unit,
-          batchNumber,
-          expiryDate: expiryDate ? new Date(expiryDate) : null,
-          supplierId: supplierId || null,
-          purchasePrice: safePurchasePrice,
-          sellingPrice: safeSellingPrice,
-          stockQuantity: updatedQty,
-          minThreshold: safeMinThreshold,
-          maxThreshold: safeMaxThreshold,
-          reorderLevel: safeReorderLevel,
-          status: resolvedStatus,
-          shelfLocation: cleanShelfLocation !== undefined ? cleanShelfLocation : undefined
-        },
-        include: { supplier: true }
-      });
-
-      // Create transaction if the stock quantity actually changed
-      const qtyDiff = updatedQty - existingItem.stockQuantity;
-      if (qtyDiff !== 0) {
-        await prisma.inventoryTransaction.create({
+      const item = await prisma.$transaction(async (tx) => {
+        const updatedItem = await tx.inventoryItem.update({
+          where: { id: req.params.id },
           data: {
-            inventoryItemId: item.id,
-            type: qtyDiff > 0 ? 'STOCK_IN' : 'ADJUSTMENT',
-            quantity: Math.abs(qtyDiff),
-            performedBy: String(user),
-            referenceId: adjustType || 'MANUAL_UPDATE'
-          }
+            itemCode,
+            name,
+            genericName,
+            brandName,
+            category,
+            type,
+            dosage,
+            unit,
+            batchNumber,
+            expiryDate: expiryDate ? new Date(expiryDate) : null,
+            supplierId: supplierId || null,
+            purchasePrice: safePurchasePrice,
+            sellingPrice: safeSellingPrice,
+            stockQuantity: updatedQty,
+            minThreshold: safeMinThreshold,
+            maxThreshold: safeMaxThreshold,
+            reorderLevel: safeReorderLevel,
+            status: resolvedStatus,
+            shelfLocation: cleanShelfLocation !== undefined ? cleanShelfLocation : undefined
+          },
+          include: { supplier: true }
         });
-      }
+
+        // Create transaction if the stock quantity actually changed
+        const qtyDiff = updatedQty - existingItem.stockQuantity;
+        if (qtyDiff !== 0) {
+          await tx.inventoryTransaction.create({
+            data: {
+              inventoryItemId: updatedItem.id,
+              type: qtyDiff > 0 ? 'STOCK_IN' : 'ADJUSTMENT',
+              quantity: Math.abs(qtyDiff),
+              performedBy: String(user),
+              referenceId: adjustType || 'MANUAL_UPDATE'
+            }
+          });
+        }
+        
+        return updatedItem;
+      });
 
       res.json(item);
     } catch (error: any) {
@@ -6030,40 +6038,46 @@ async function startServer() {
   app.patch('/api/inventory/reorders/:id', authenticateJWT, requireRole(['PHARMACY', 'ADMIN']), async (req, res) => {
     try {
       const { status } = req.body;
-      const reorder = await prisma.reorderRequest.update({
-        where: { id: req.params.id },
-        data: { status },
-        include: { inventoryItem: true }
-      });
+      const reorderId = req.params.id;
 
-      // If reorder request is marked COMPLETED, let's automatically credit the stock
-      if (status === 'COMPLETED') {
-        const existingItem = await prisma.inventoryItem.findUnique({
-          where: { id: reorder.inventoryItemId }
+      const reorder = await prisma.$transaction(async (tx) => {
+        const updatedReorder = await tx.reorderRequest.update({
+          where: { id: reorderId },
+          data: { status },
+          include: { inventoryItem: true }
         });
-        if (existingItem) {
-          const newQty = existingItem.stockQuantity + reorder.quantityRequested;
-          const isStillDepleted = newQty <= 0;
-          const item = await prisma.inventoryItem.update({
-            where: { id: reorder.inventoryItemId },
-            data: {
-              stockQuantity: newQty,
-              status: isStillDepleted ? 'DEPLETED' : (existingItem.status === 'DEPLETED' ? 'ACTIVE' : existingItem.status)
-            }
-          });
 
-          // and add a stocking transaction
-          await prisma.inventoryTransaction.create({
-            data: {
-              inventoryItemId: item.id,
-              type: 'STOCK_IN',
-              quantity: reorder.quantityRequested,
-              performedBy: 'System Auto-Credit',
-              referenceId: `REORDER_${reorder.id}`
-            }
+        // If reorder request is marked COMPLETED, let's automatically credit the stock
+        if (status === 'COMPLETED') {
+          const existingItem = await tx.inventoryItem.findUnique({
+            where: { id: updatedReorder.inventoryItemId }
           });
+          if (existingItem) {
+            const newQty = existingItem.stockQuantity + updatedReorder.quantityRequested;
+            const isStillDepleted = newQty <= 0;
+            const item = await tx.inventoryItem.update({
+              where: { id: updatedReorder.inventoryItemId },
+              data: {
+                stockQuantity: newQty,
+                status: isStillDepleted ? 'DEPLETED' : (existingItem.status === 'DEPLETED' ? 'ACTIVE' : existingItem.status)
+              }
+            });
+
+            // and add a stocking transaction
+            await tx.inventoryTransaction.create({
+              data: {
+                inventoryItemId: item.id,
+                type: 'STOCK_IN',
+                quantity: updatedReorder.quantityRequested,
+                performedBy: 'System Auto-Credit',
+                referenceId: `REORDER_${updatedReorder.id}`
+              }
+            });
+          }
         }
-      }
+        
+        return updatedReorder;
+      });
 
       res.json(reorder);
     } catch (error) {
@@ -6080,7 +6094,6 @@ async function startServer() {
         return res.status(400).json({ error: 'Items payload must be an array' });
       }
 
-      const imported = [];
       const user = req.headers['x-user-name'] || 'Bulk File System';
 
       // Prefetch all requested itemCodes to prevent N+1 query overhead in loop
@@ -6090,72 +6103,76 @@ async function startServer() {
       });
       const existingItemsMap = new Map(existingItems.map(item => [item.itemCode, item]));
 
-      for (const raw of items) {
-        if (!raw.itemCode || !raw.name) continue;
-        
-        // Find existing from pre-fetched map
-        const existing = existingItemsMap.get(raw.itemCode);
-
-        if (existing) {
-          const updated = await prisma.inventoryItem.update({
-            where: { id: existing.id },
-            data: {
-              name: raw.name || existing.name,
-              genericName: raw.genericName || existing.genericName,
-              brandName: raw.brandName || existing.brandName,
-              category: raw.category || existing.category,
-              type: raw.type || existing.type || 'MEDICINE',
-              dosage: raw.dosage || existing.dosage,
-              unit: raw.unit || existing.unit,
-              batchNumber: raw.batchNumber || existing.batchNumber,
-              expiryDate: raw.expiryDate ? new Date(raw.expiryDate) : existing.expiryDate,
-              purchasePrice: raw.purchasePrice ? parseFloat(raw.purchasePrice) : existing.purchasePrice,
-              sellingPrice: raw.sellingPrice ? parseFloat(raw.sellingPrice) : existing.sellingPrice,
-              stockQuantity: raw.stockQuantity ? parseInt(raw.stockQuantity) : existing.stockQuantity,
-              minThreshold: raw.minThreshold ? parseInt(raw.minThreshold) : existing.minThreshold,
-              maxThreshold: raw.maxThreshold ? parseInt(raw.maxThreshold) : existing.maxThreshold,
-              reorderLevel: raw.reorderLevel ? parseInt(raw.reorderLevel) : existing.reorderLevel,
-              status: raw.status || existing.status
-            }
-          });
-          imported.push(updated);
-        } else {
-          const created = await prisma.inventoryItem.create({
-            data: {
-              itemCode: raw.itemCode,
-              name: raw.name,
-              genericName: raw.genericName || '',
-              brandName: raw.brandName || '',
-              category: raw.category || 'General',
-              type: raw.type || 'MEDICINE',
-              dosage: raw.dosage || '',
-              unit: raw.unit || 'Box',
-              batchNumber: raw.batchNumber || `BCH-${Math.floor(1000 + Math.random() * 9000)}`,
-              expiryDate: raw.expiryDate ? new Date(raw.expiryDate) : new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // Default 1 year
-              purchasePrice: parseFloat(raw.purchasePrice) || 0,
-              sellingPrice: parseFloat(raw.sellingPrice) || 0,
-              stockQuantity: parseInt(raw.stockQuantity) || 0,
-              minThreshold: parseInt(raw.minThreshold) || 10,
-              maxThreshold: parseInt(raw.maxThreshold) || 100,
-              reorderLevel: parseInt(raw.reorderLevel) || 20,
-              status: raw.status || 'ACTIVE'
-            }
-          });
+      const imported = await prisma.$transaction(async (tx) => {
+        const results = [];
+        for (const raw of items) {
+          if (!raw.itemCode || !raw.name) continue;
           
-          if (created.stockQuantity > 0) {
-            await prisma.inventoryTransaction.create({
+          // Find existing from pre-fetched map
+          const existing = existingItemsMap.get(raw.itemCode);
+
+          if (existing) {
+            const updated = await tx.inventoryItem.update({
+              where: { id: existing.id },
               data: {
-                inventoryItemId: created.id,
-                type: 'STOCK_IN',
-                quantity: created.stockQuantity,
-                performedBy: String(user),
-                referenceId: 'BULK_IMPORT'
+                name: raw.name || existing.name,
+                genericName: raw.genericName || existing.genericName,
+                brandName: raw.brandName || existing.brandName,
+                category: raw.category || existing.category,
+                type: raw.type || existing.type || 'MEDICINE',
+                dosage: raw.dosage || existing.dosage,
+                unit: raw.unit || existing.unit,
+                batchNumber: raw.batchNumber || existing.batchNumber,
+                expiryDate: raw.expiryDate ? new Date(raw.expiryDate) : existing.expiryDate,
+                purchasePrice: raw.purchasePrice ? parseFloat(raw.purchasePrice) : existing.purchasePrice,
+                sellingPrice: raw.sellingPrice ? parseFloat(raw.sellingPrice) : existing.sellingPrice,
+                stockQuantity: raw.stockQuantity ? parseInt(raw.stockQuantity) : existing.stockQuantity,
+                minThreshold: raw.minThreshold ? parseInt(raw.minThreshold) : existing.minThreshold,
+                maxThreshold: raw.maxThreshold ? parseInt(raw.maxThreshold) : existing.maxThreshold,
+                reorderLevel: raw.reorderLevel ? parseInt(raw.reorderLevel) : existing.reorderLevel,
+                status: raw.status || existing.status
               }
             });
+            results.push(updated);
+          } else {
+            const created = await tx.inventoryItem.create({
+              data: {
+                itemCode: raw.itemCode,
+                name: raw.name,
+                genericName: raw.genericName || '',
+                brandName: raw.brandName || '',
+                category: raw.category || 'General',
+                type: raw.type || 'MEDICINE',
+                dosage: raw.dosage || '',
+                unit: raw.unit || 'Box',
+                batchNumber: raw.batchNumber || `BCH-${Math.floor(1000 + Math.random() * 9000)}`,
+                expiryDate: raw.expiryDate ? new Date(raw.expiryDate) : new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // Default 1 year
+                purchasePrice: parseFloat(raw.purchasePrice) || 0,
+                sellingPrice: parseFloat(raw.sellingPrice) || 0,
+                stockQuantity: parseInt(raw.stockQuantity) || 0,
+                minThreshold: parseInt(raw.minThreshold) || 10,
+                maxThreshold: parseInt(raw.maxThreshold) || 100,
+                reorderLevel: parseInt(raw.reorderLevel) || 20,
+                status: raw.status || 'ACTIVE'
+              }
+            });
+            
+            if (created.stockQuantity > 0) {
+              await tx.inventoryTransaction.create({
+                data: {
+                  inventoryItemId: created.id,
+                  type: 'STOCK_IN',
+                  quantity: created.stockQuantity,
+                  performedBy: String(user),
+                  referenceId: 'BULK_IMPORT'
+                }
+              });
+            }
+            results.push(created);
           }
-          imported.push(created);
         }
-      }
+        return results;
+      });
       res.json({ success: true, count: imported.length });
     } catch (error: any) {
       console.error(error);
