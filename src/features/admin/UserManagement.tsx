@@ -112,6 +112,54 @@ export default function UserManagement() {
   const [timezoneReference, setTimezoneReference] = useState('Asia/Kolkata');
   const [isSavingSettings, setIsSavingSettings] = useState(false);
 
+  // Admin Self Password Change state
+  const [adminCurrentPassword, setAdminCurrentPassword] = useState('');
+  const [adminNewPassword, setAdminNewPassword] = useState('');
+  const [adminConfirmPassword, setAdminConfirmPassword] = useState('');
+  const [isChangingAdminPassword, setIsChangingAdminPassword] = useState(false);
+
+  const handleAdminChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminCurrentPassword || !adminNewPassword || !adminConfirmPassword) {
+      toast.error('All fields are required.');
+      return;
+    }
+    if (adminNewPassword !== adminConfirmPassword) {
+      toast.error('New password and confirmation password do not match.');
+      return;
+    }
+    if (adminNewPassword.length < 6) {
+      toast.error('New password must be at least 6 characters in length.');
+      return;
+    }
+
+    setIsChangingAdminPassword(true);
+    try {
+      const res = await authFetch('/api/admin/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ currentPassword: adminCurrentPassword, newPassword: adminNewPassword })
+      });
+
+      if (res.ok) {
+        toast.success('Your administrative password has been changed successfully!');
+        setAdminCurrentPassword('');
+        setAdminNewPassword('');
+        setAdminConfirmPassword('');
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        toast.error(errData.error || 'Failed to change password. Please check your current password.');
+      }
+    } catch (err) {
+      console.error('Password update failed:', err);
+      toast.error('An unexpected error occurred during password update.');
+    } finally {
+      setIsChangingAdminPassword(false);
+    }
+  };
+
   const isProtectedAccount = (u: any) => {
     if (!u) return false;
     const protectedEmails = ['admin@hospital.com', 'reception@hospital.com', 'pharmacy@hospital.com'];
@@ -1677,6 +1725,70 @@ export default function UserManagement() {
             </button>
           </form>
         </div>
+      </div>
+
+      {/* Administrator Account Security Card */}
+      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm" id="admin-account-security-card">
+        <div className="flex items-center gap-3 mb-4 border-b border-slate-100 pb-3">
+          <div className="w-8 h-8 rounded-lg bg-red-50 text-red-600 flex items-center justify-center">
+            <Lock size={16} />
+          </div>
+          <div>
+            <h3 className="text-base font-bold text-slate-800">Administrator Account Security</h3>
+            <p className="text-xs text-slate-400">Update your account security passphrase. Security updates take effect immediately across all active sessions.</p>
+          </div>
+        </div>
+
+        <form onSubmit={handleAdminChangePassword} className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-bold text-slate-450 uppercase tracking-wider font-semibold">Current Password</label>
+              <input 
+                type="password" 
+                placeholder="••••••••"
+                value={adminCurrentPassword}
+                onChange={(e) => setAdminCurrentPassword(e.target.value)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-red-600/10 focus:border-red-600"
+                required
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-bold text-slate-450 uppercase tracking-wider font-semibold">New Password</label>
+              <input 
+                type="password" 
+                placeholder="••••••••"
+                value={adminNewPassword}
+                onChange={(e) => setAdminNewPassword(e.target.value)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-red-600/10 focus:border-red-600"
+                required
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-bold text-slate-450 uppercase tracking-wider font-semibold">Confirm Password</label>
+              <input 
+                type="password" 
+                placeholder="••••••••"
+                value={adminConfirmPassword}
+                onChange={(e) => setAdminConfirmPassword(e.target.value)}
+                className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-red-600/10 focus:border-red-600"
+                required
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <button
+              type="submit"
+              disabled={isChangingAdminPassword}
+              className="px-5 py-2.5 bg-red-600 hover:bg-red-750 text-white font-extrabold text-xs rounded-lg shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <ShieldCheck size={14} />
+              {isChangingAdminPassword ? 'Processing Password Update...' : 'Change Password'}
+            </button>
+          </div>
+        </form>
       </div>
 
       {/* MODAL SYSTEM */}

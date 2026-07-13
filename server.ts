@@ -8,6 +8,8 @@ import { prisma, withDbRetry } from './src/lib/prisma.js';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 
+import crypto from 'crypto';
+
 const SALT_ROUNDS = 10;
 
 async function hashPassword(password: string): Promise<string> {
@@ -32,6 +34,11 @@ interface CacheEntry {
   expiresAt: number;
 }
 const serverCacheMap = new Map<string, CacheEntry>();
+
+function getSafeErrorMessage(error: any, fallback: string): string {
+  const isProd = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
+  return isProd ? fallback : (error?.message || fallback);
+}
 
 function getCachedData(key: string): any {
   const entry = serverCacheMap.get(key);
@@ -372,8 +379,6 @@ const doctorShiftInterval = setInterval(() => {
 
 // -----------------------------------------------------
 
-import crypto from 'crypto';
-
 let JWT_SECRET: string = process.env.JWT_SECRET || '';
 if (!JWT_SECRET || JWT_SECRET === 'HospitalSecureJWT_Main_2026_X9#Auth') {
   if (process.env.NODE_ENV === 'production' || process.env.RENDER === 'true') {
@@ -511,6 +516,29 @@ async function startServer() {
   const app = express();
   app.use(express.json());
 
+  // Observability & Telemetry Middleware
+  app.use((req: any, res: any, next: any) => {
+    const requestId = req.headers['x-request-id'] || crypto.randomUUID();
+    req.requestId = requestId;
+    res.setHeader('X-Request-Id', requestId);
+    
+    const start = Date.now();
+    
+    if (req.path.startsWith('/api')) {
+      console.log(`[REQ] ${requestId} ${req.method} ${req.originalUrl}`);
+    }
+
+    res.on('finish', () => {
+      if (req.path.startsWith('/api')) {
+        const duration = Date.now() - start;
+        const logMethod = res.statusCode >= 500 ? console.error : (res.statusCode >= 400 ? console.warn : console.log);
+        logMethod(`[RES] ${requestId} ${req.method} ${req.originalUrl} - ${res.statusCode} - ${duration}ms`);
+      }
+    });
+
+    next();
+  });
+
   // Security Headers Middleware
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -526,7 +554,8 @@ async function startServer() {
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
       version: '1.0.0',
-      environment: process.env.NODE_ENV || 'development'
+      environment: process.env.NODE_ENV || 'development',
+      memoryUsage: process.memoryUsage()
     });
   });
 
@@ -1256,7 +1285,7 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error('Password reset request error:', error);
-      res.status(500).json({ error: error.message || 'Internal server error processing recovery request.' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Internal server error processing recovery request.') });
     }
   });
 
@@ -1444,7 +1473,27 @@ async function startServer() {
 
       const settings = await getShiftSettings();
       const timezone = settings.timezone || "Asia/Kolkata";
-      const todayStr = getLocalDateStringInTimezone(new Date(), timezone);
+
+      const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      });
+
+      const formatDate = (date: Date) => {
+        try {
+          const parts = formatter.formatToParts(date);
+          const y = parts.find(p => p.type === 'year')?.value;
+          const m = parts.find(p => p.type === 'month')?.value;
+          const d = parts.find(p => p.type === 'day')?.value;
+          return `${y}-${m}-${d}`;
+        } catch (e) {
+          return date.toISOString().split('T')[0];
+        }
+      };
+
+      const todayStr = formatDate(new Date());
 
       // Pad query range by 24 hours to safely capture all boundary logs for the target timezone
       const dbStart = new Date(start.getTime() - 24 * 60 * 60 * 1000);
@@ -1501,6 +1550,28 @@ async function startServer() {
       const dEnd = new Date(end.toISOString().split('T')[0] + 'T00:00:00.000Z');
       const diffDays = Math.round((dEnd.getTime() - dStart.getTime()) / (1000 * 60 * 60 * 24)) + 1;
 
+      const logsMap = new Map<string, typeof logs>();
+      for (const l of logs) {
+        const key = `${l.userId}_${formatDate(l.timestamp)}`;
+        let arr = logsMap.get(key);
+        if (!arr) {
+          arr = [];
+          logsMap.set(key, arr);
+        }
+        arr.push(l);
+      }
+
+      const consultationsMap = new Map<string, typeof consultations>();
+      for (const c of consultations) {
+        const key = `${c.doctorId}_${formatDate(c.createdAt)}`;
+        let arr = consultationsMap.get(key);
+        if (!arr) {
+          arr = [];
+          consultationsMap.set(key, arr);
+        }
+        arr.push(c);
+      }
+
       // Iterate through each date in the range using UTC safely
       for (let i = 0; i < diffDays; i++) {
         const currentDate = new Date(start);
@@ -1509,15 +1580,13 @@ async function startServer() {
 
         // Process for each doctor on this day
         for (const doctor of doctors) {
+          const key = `${doctor.id}_${dateStr}`;
+
           // Filter logs that fall on dateStr in target timezone
-          const doctorLogs = logs.filter(
-            (l) => l.userId === doctor.id && getLocalDateStringInTimezone(l.timestamp, timezone) === dateStr
-          );
+          const doctorLogs = logsMap.get(key) || [];
 
           // Filter consultations that fall on dateStr in target timezone
-          const doctorConsultations = consultations.filter(
-            (c) => c.doctorId === doctor.id && getLocalDateStringInTimezone(c.createdAt, timezone) === dateStr
-          );
+          const doctorConsultations = consultationsMap.get(key) || [];
 
           // 1. Duty Activated (must be earliest 'DUTY_ON' action today or current active lastActivatedAt)
           const dutyOnLogs = doctorLogs.filter(l => l.action === 'DUTY_ON');
@@ -1525,7 +1594,7 @@ async function startServer() {
           let dutyActivatedTime = dutyOnLogs.length > 0 ? dutyOnLogs[0].timestamp : null;
 
           if (doctor.lastActivatedAt) {
-            const activationLocalDay = getLocalDateStringInTimezone(doctor.lastActivatedAt, timezone);
+            const activationLocalDay = formatDate(doctor.lastActivatedAt);
             if (activationLocalDay === dateStr) {
               if (!dutyActivatedTime || doctor.lastActivatedAt < dutyActivatedTime) {
                 dutyActivatedTime = doctor.lastActivatedAt;
@@ -1613,7 +1682,7 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error('Doctor attendance report query failure:', error);
-      res.status(500).json({ error: error.message || 'Failed to fetch doctor attendance reports.' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed to fetch doctor attendance reports.') });
     }
   });
 
@@ -1641,6 +1710,51 @@ async function startServer() {
     } catch (error: any) {
       console.error('Change password error:', error);
       res.status(500).json({ error: 'Failed to update password. Please retry.' });
+    }
+  });
+
+  app.post('/api/admin/change-password', authenticateJWT, requireRole(['ADMIN']), async (req: any, res: any) => {
+    const { currentPassword, newPassword } = req.body;
+    try {
+      if (!currentPassword || !newPassword) {
+        return res.status(400).json({ error: 'Current password and new password are required.' });
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.userId }
+      });
+
+      if (!user) {
+        return res.status(404).json({ error: 'Admin user not found.' });
+      }
+
+      if (user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Only administrators are authorized to access this change password endpoint.' });
+      }
+
+      const isCurrentPasswordCorrect = await comparePassword(currentPassword, user.password || '');
+      if (!isCurrentPasswordCorrect) {
+        return res.status(400).json({ error: 'Incorrect current password.' });
+      }
+
+      if (newPassword.trim().length < 6) {
+        return res.status(400).json({ error: 'New password must be at least 6 characters in length.' });
+      }
+
+      const hashedNewPass = await hashPassword(newPassword.trim());
+
+      await prisma.user.update({
+        where: { id: req.user.userId },
+        data: {
+          password: hashedNewPass,
+          requiresPasswordChange: false
+        }
+      });
+
+      res.json({ success: true, message: 'Your administrator password has been updated successfully.' });
+    } catch (error: any) {
+      console.error('Admin self-password change error:', error);
+      res.status(500).json({ error: 'Internal system error while updating your administrator password.' });
     }
   });
 
@@ -2695,7 +2809,7 @@ async function startServer() {
       res.json(user);
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || 'Failed to create user' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed to create user') });
     }
   });
 
@@ -2806,7 +2920,7 @@ async function startServer() {
       res.json(user);
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || 'Failed to update user' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed to update user') });
     }
   });
 
@@ -3154,6 +3268,10 @@ async function startServer() {
     if (role === 'RECEPTION' || role === 'PHARMACY') {
       const { medicalHistory, chronicConditions, allergies, bloodPressure, weight, temperature, ...safePatient } = patient;
       
+      if (role === 'RECEPTION') {
+        safePatient.medicalHistory = medicalHistory;
+      }
+      
       if (safePatient.consultations && Array.isArray(safePatient.consultations)) {
         safePatient.consultations = safePatient.consultations.map((c: any) => sanitizeConsultationPHI(c, role));
       }
@@ -3201,6 +3319,25 @@ async function startServer() {
       }
       if (safeToken.doctor) {
         delete safeToken.doctor.id;
+      }
+      if (safeToken.visitRecord && safeToken.visitRecord.consultation) {
+        const { notes, diagnosis, symptoms, chiefComplaint, vitals, followUp, referrals, labRequests, doctorId: _, ...safeConsultation } = safeToken.visitRecord.consultation;
+        if (safeConsultation.prescription) {
+          const { doctorId: __, ...safePrescription } = safeConsultation.prescription;
+          safeConsultation.prescription = safePrescription;
+        }
+        safeToken.visitRecord.consultation = safeConsultation;
+      }
+      return safeToken;
+    }
+    if (role === 'RECEPTION') {
+      const { ...safeToken } = token;
+      if (safeToken.patient) {
+        safeToken.patient = sanitizePatientPHI(safeToken.patient, role);
+      }
+      if (safeToken.visitRecord && safeToken.visitRecord.consultation) {
+        const { notes, diagnosis, symptoms, chiefComplaint, vitals, followUp, referrals, labRequests, prescription: _, ...safeConsultation } = safeToken.visitRecord.consultation;
+        safeToken.visitRecord.consultation = safeConsultation;
       }
       return safeToken;
     }
@@ -3454,8 +3591,14 @@ async function startServer() {
             take: 1
           },
           consultations: {
+            where: isDoctor ? { doctorId: req.user.userId } : {},
             orderBy: { createdAt: 'desc' },
-            take: 1
+            take: 1,
+            include: {
+              doctor: {
+                select: { name: true, department: true }
+              }
+            }
           }
         }
       });
@@ -4160,7 +4303,7 @@ async function startServer() {
     } catch (error: any) {
       console.error(error);
       const isAuthError = error.message?.includes('Unauthorized');
-      res.status(isAuthError ? 403 : 500).json({ error: error.message || 'Failed to update token' });
+      res.status(isAuthError ? 403 : 500).json({ error: isAuthError ? error.message : getSafeErrorMessage(error, 'Failed to update token') });
     }
   });
 
@@ -4294,7 +4437,21 @@ async function startServer() {
         if (tempVal) patientUpdateData.temperature = tempVal;
         if (weightVal) patientUpdateData.weight = weightVal;
         if (allergyVal) {
-          patientUpdateData.medicalHistory = `Allergies: ${allergyVal}`;
+          const currentPatient = await tx.patient.findUnique({
+            where: { id: patientId },
+            select: { medicalHistory: true }
+          });
+          const existingHistory = currentPatient?.medicalHistory || '';
+          
+          if (existingHistory.includes('Reason:')) {
+            if (/Allergies:\s*/i.test(existingHistory)) {
+              patientUpdateData.medicalHistory = existingHistory.replace(/Allergies:\s*[^\n]*/i, `Allergies: ${allergyVal}`);
+            } else {
+              patientUpdateData.medicalHistory = `${existingHistory}\nAllergies: ${allergyVal}`;
+            }
+          } else {
+            patientUpdateData.medicalHistory = `Allergies: ${allergyVal}`;
+          }
           patientUpdateData.allergies = allergyVal;
         }
         if (chronicConditionsVal !== undefined) patientUpdateData.chronicConditions = chronicConditionsVal;
@@ -4441,7 +4598,7 @@ async function startServer() {
       res.json(result);
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || 'Failed to complete consultation' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed to complete consultation') });
     }
   });
 
@@ -4617,7 +4774,7 @@ async function startServer() {
   });
 
   // Pharmacy Queue
-  app.get('/api/pharmacy/queue', authenticateJWT, requireRole(['PHARMACY']), async (req, res) => {
+  app.get('/api/pharmacy/queue', authenticateJWT, requireRole(['PHARMACY', 'ADMIN']), async (req, res) => {
     try {
       const queue = await prisma.pharmacyQueue.findMany({
         where: { status: { in: ['PENDING', 'VERIFIED'] } },
@@ -4652,7 +4809,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/pharmacy/history', authenticateJWT, requireRole(['PHARMACY']), async (req, res) => {
+  app.get('/api/pharmacy/history', authenticateJWT, requireRole(['PHARMACY', 'ADMIN']), async (req, res) => {
     try {
       const { page, limit, search } = req.query;
       const pageNum = page ? parseInt(String(page), 10) : null;
@@ -5688,7 +5845,7 @@ async function startServer() {
       res.json(item);
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || 'Failed to create inventory item' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed to create inventory item') });
     }
   });
 
@@ -5751,7 +5908,7 @@ async function startServer() {
       res.status(201).json(newBatch);
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || 'Failed to add stock batch.' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed to add stock batch.') });
     }
   });
 
@@ -5878,7 +6035,7 @@ async function startServer() {
       res.json(item);
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || 'Failed to update inventory item' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed to update inventory item') });
     }
   });
 
@@ -5952,7 +6109,7 @@ async function startServer() {
       res.json({ success: true, message: 'Batch removed successfully from active inventory.' });
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: 'Failed to delete inventory item: ' + error.message });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed to delete inventory item') });
     }
   });
 
@@ -6176,7 +6333,7 @@ async function startServer() {
       res.json({ success: true, count: imported.length });
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || 'Failed bulk importing items' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Failed bulk importing items') });
     }
   });
 
@@ -6373,7 +6530,7 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error(error);
-      res.status(500).json({ error: error.message || 'Error processing bulk upload' });
+      res.status(500).json({ error: getSafeErrorMessage(error, 'Error processing bulk upload') });
     }
   });
 
@@ -6386,25 +6543,86 @@ async function startServer() {
         return res.json({ patients: [], tokens: [], consultations: [] });
       }
 
+      const isDoctor = req.user.role === 'DOCTOR';
+      const doctorPatientAuthClause = isDoctor ? {
+        OR: [
+          { consultations: { some: { doctorId: req.user.userId } } },
+          { appointments: { some: { doctorId: req.user.userId } } },
+          { tokens: { some: { doctorId: req.user.userId } } }
+        ]
+      } : {};
+
       const patients = await prisma.patient.findMany({
         where: {
-          OR: [
-            { id: { contains: q, mode: 'insensitive' } },
-            { name: { contains: q, mode: 'insensitive' } },
-            { phone: { contains: q, mode: 'insensitive' } },
-            { email: { contains: q, mode: 'insensitive' } }
+          AND: [
+            {
+              OR: [
+                { id: { contains: q, mode: 'insensitive' } },
+                { name: { contains: q, mode: 'insensitive' } },
+                { phone: { contains: q, mode: 'insensitive' } },
+                { email: { contains: q, mode: 'insensitive' } }
+              ]
+            },
+            ...(isDoctor ? [doctorPatientAuthClause] : [])
           ]
-        },
-        take: 10
+        }
       });
+
+      const queryLower = q.toLowerCase();
+      const getMatchCategory = (p: any, qLower: string): number => {
+        const nameLower = (p.name || '').toLowerCase();
+        const phoneLower = (p.phone || '').toLowerCase();
+        const emailLower = (p.email || '').toLowerCase();
+        const idLower = (p.id || '').toLowerCase();
+
+        if (
+          nameLower === qLower ||
+          phoneLower === qLower ||
+          emailLower === qLower ||
+          idLower === qLower
+        ) {
+          return 0; // Exact match
+        }
+
+        if (
+          nameLower.startsWith(qLower) ||
+          phoneLower.startsWith(qLower) ||
+          emailLower.startsWith(qLower) ||
+          idLower.startsWith(qLower)
+        ) {
+          return 1; // Starts-with match
+        }
+
+        return 2; // Remaining contains match
+      };
+
+      const sortedPatients = patients.sort((a: any, b: any) => {
+        const catA = getMatchCategory(a, queryLower);
+        const catB = getMatchCategory(b, queryLower);
+
+        if (catA !== catB) {
+          return catA - catB;
+        }
+
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return timeB - timeA;
+      });
+
+      const slicedPatients = sortedPatients.slice(0, 10);
 
       const tokens = await prisma.token.findMany({
         where: {
-          OR: [
-            { id: { contains: q, mode: 'insensitive' } },
-            { tokenNumber: { contains: q, mode: 'insensitive' } },
-            { patient: { name: { contains: q, mode: 'insensitive' } } },
-            { patient: { id: { contains: q, mode: 'insensitive' } } }
+          AND: [
+            {
+              OR: [
+                { id: { contains: q, mode: 'insensitive' } },
+                { tokenNumber: { contains: q, mode: 'insensitive' } },
+                { patient: { name: { contains: q, mode: 'insensitive' } } },
+                { patient: { id: { contains: q, mode: 'insensitive' } } }
+              ]
+            },
+            ...(isDoctor ? [{ patient: doctorPatientAuthClause }] : [])
           ]
         },
         include: {
@@ -6417,12 +6635,17 @@ async function startServer() {
       if (req.user.role === 'DOCTOR' || req.user.role === 'ADMIN') {
         consultations = await prisma.consultation.findMany({
           where: {
-            OR: [
-              { id: { contains: q, mode: 'insensitive' } },
-              { diagnosis: { contains: q, mode: 'insensitive' } },
-              { notes: { contains: q, mode: 'insensitive' } },
-              { patient: { name: { contains: q, mode: 'insensitive' } } },
-              { doctor: { name: { contains: q, mode: 'insensitive' } } }
+            AND: [
+              {
+                OR: [
+                  { id: { contains: q, mode: 'insensitive' } },
+                  { diagnosis: { contains: q, mode: 'insensitive' } },
+                  { notes: { contains: q, mode: 'insensitive' } },
+                  { patient: { name: { contains: q, mode: 'insensitive' } } },
+                  { doctor: { name: { contains: q, mode: 'insensitive' } } }
+                ]
+              },
+              ...(isDoctor ? [{ patient: doctorPatientAuthClause }] : [])
             ]
           },
           include: {
@@ -6433,7 +6656,7 @@ async function startServer() {
         });
       }
 
-      const sanitizedPatients = patients.map((p: any) => sanitizePatientPHI(p, req.user.role));
+      const sanitizedPatients = slicedPatients.map((p: any) => sanitizePatientPHI(p, req.user.role));
       const sanitizedTokens = tokens.map((t: any) => sanitizeTokenPHI(t, req.user.role));
 
       res.json({ patients: sanitizedPatients, tokens: sanitizedTokens, consultations });
@@ -6547,14 +6770,15 @@ async function startServer() {
     console.error('[GLOBAL ERROR HANDLER]', err);
     
     const isProd = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
-    const message = isProd ? 'An unexpected system error occurred on the clinical registry server.' : err.message;
+    const status = err.status || 500;
+    const message = (isProd && status >= 500) ? 'An unexpected system error occurred on the clinical registry server.' : err.message;
     
     if (res.headersSent) {
       return next(err);
     }
     
     if (req.path.startsWith('/api')) {
-      res.status(err.status || 500).json({
+      res.status(status).json({
         error: message,
         ...(isProd ? {} : { stack: err.stack })
       });

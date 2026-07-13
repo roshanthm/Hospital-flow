@@ -99,9 +99,6 @@ export default function PatientRegistration() {
     doctorId: '',
     priority: 'Medium' as 'Low' | 'Medium' | 'High' | 'Urgent',
     reasonForVisit: '',
-    bloodPressure: '120/80',
-    weight: '75.0',
-    temperature: '36.6',
   });
 
   useEffect(() => {
@@ -158,27 +155,34 @@ export default function PatientRegistration() {
 
   // Set and synchronize default doctor ID and automatically set derived department
   useEffect(() => {
-    if (activeDoctorsInRegistration.length > 0) {
-      const isCurrentValid = activeDoctorsInRegistration.some(d => d.id === formData.doctorId);
-      const targetDoc = isCurrentValid 
-        ? activeDoctorsInRegistration.find(d => d.id === formData.doctorId) 
-        : activeDoctorsInRegistration[0];
-      
-      const newDoctorId = targetDoc?.id || '';
-      const newDept = (targetDoc?.department || 'GENERAL MEDICINE').toUpperCase() as any;
-
-      if (formData.doctorId !== newDoctorId || formData.department !== newDept) {
-        setFormData(prev => ({ 
-          ...prev, 
-          doctorId: newDoctorId,
-          department: newDept
-        }));
-      }
-    } else {
-      if (formData.doctorId !== '' || formData.department !== 'GENERAL MEDICINE') {
+    const onDutyDocs = activeDoctorsInRegistration.filter(u => u.dutyStatus === 'ON DUTY' || u.dutyStatus === 'ON_DUTY');
+    if (formData.doctorId === '') {
+      if (onDutyDocs.length > 0) {
+        const defaultDoc = onDutyDocs[0];
         setFormData(prev => ({
           ...prev,
-          doctorId: '',
+          doctorId: defaultDoc.id,
+          department: (defaultDoc.department || 'GENERAL MEDICINE').toUpperCase() as any
+        }));
+      }
+      return;
+    }
+    if (activeDoctorsInRegistration.length > 0) {
+      const isCurrentValid = activeDoctorsInRegistration.some(d => d.id === formData.doctorId);
+      if (isCurrentValid) {
+        const targetDoc = activeDoctorsInRegistration.find(d => d.id === formData.doctorId);
+        const newDept = (targetDoc?.department || 'GENERAL MEDICINE').toUpperCase() as any;
+        if (formData.department !== newDept) {
+          setFormData(prev => ({ 
+            ...prev, 
+            department: newDept
+          }));
+        }
+      }
+    } else {
+      if (formData.department !== 'GENERAL MEDICINE') {
+        setFormData(prev => ({
+          ...prev,
           department: 'GENERAL MEDICINE' as any
         }));
       }
@@ -205,13 +209,32 @@ export default function PatientRegistration() {
     e.preventDefault();
 
     try {
-      // Build a comprehensive medical history note that embeds vitals and priority details
+      const selectedDoc = (users || []).find(u => u.id === formData.doctorId);
+      const isSelectedDocOnDuty = selectedDoc && (selectedDoc.dutyStatus === 'ON DUTY' || selectedDoc.dutyStatus === 'ON_DUTY');
+      const isSelectedDocOffDuty = selectedDoc && !(selectedDoc.dutyStatus === 'ON_DUTY' || selectedDoc.dutyStatus === 'ON_DUTY');
+
+      let assignedDoctorNotes = 'Pending Assignment';
+      let displayMessage = '';
+
+      if (selectedDoc && isSelectedDocOnDuty) {
+        assignedDoctorNotes = formData.doctorId;
+        displayMessage = `Patient "${formData.name}" successfully registered inside patient directory!`;
+      } else if (!isAnyDoctorOnDuty || !selectedDoc) {
+        // Case 2: No doctor available
+        assignedDoctorNotes = 'Pending Assignment';
+        displayMessage = `Patient "${formData.name}" has been registered successfully and can be assigned to a doctor later once available.`;
+      } else if (isSelectedDocOffDuty) {
+        // Case 3: Selected doctor is OFF DUTY
+        assignedDoctorNotes = 'Pending Assignment';
+        displayMessage = `Patient "${formData.name}" has been registered successfully. The selected doctor is currently OFF DUTY, so a physician can be assigned once available.`;
+      }
+
+      // Build a comprehensive medical history note that embeds details and priority details
       const consolidatedNotes = `
 Department: ${formData.department}
-Assigned Doctor: ${formData.doctorId}
+Assigned Doctor: ${assignedDoctorNotes}
 Priority: ${formData.priority}
 Reason: ${formData.reasonForVisit}
-Vitals - BP: ${formData.bloodPressure}, Weight: ${formData.weight}kg, Temp: ${formData.temperature}°C
 Pathology history: ${formData.medicalHistory || 'None disclosed'}
 Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContactPhone})
       `.trim();
@@ -228,9 +251,6 @@ Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContact
         medicalHistory: consolidatedNotes,
         emergencyContactName: formData.emergencyContactName,
         emergencyContactPhone: formData.emergencyContactPhone,
-        bloodPressure: formData.bloodPressure,
-        weight: formData.weight,
-        temperature: formData.temperature,
       });
 
       addActivityLog({
@@ -241,7 +261,7 @@ Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContact
         details: `${formData.name} was successfully registered inside patient directory.`,
       });
 
-      toast.success(`Patient "${formData.name}" successfully registered inside patient directory!`);
+      toast.success(displayMessage);
 
       // Reset Form state
       setFormData({
@@ -257,12 +277,9 @@ Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContact
         bloodGroup: 'O+',
         medicalHistory: '',
         department: 'GENERAL MEDICINE',
-        doctorId: (users || []).filter(u => u.role === 'DOCTOR' && u.isActive !== false)[0]?.id || '',
+        doctorId: '',
         priority: 'Medium',
         reasonForVisit: '',
-        bloodPressure: '120/80',
-        weight: '75.0',
-        temperature: '36.6',
       });
       setStep(1);
       fetchPatients();
@@ -310,15 +327,6 @@ Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContact
           };
 
           const extractedReason = getHistoryVal(/Reason:\s*([^\n]+)/i, '');
-          const extractedBP = matched.bloodPressure || getHistoryVal(/BP:\s*([^\n,]+)/i, '120/80');
-          let extractedWeight = matched.weight || getHistoryVal(/Weight:\s*([^\n,]+)/i, '75.0');
-          if (extractedWeight && extractedWeight.endsWith('kg')) {
-            extractedWeight = extractedWeight.slice(0, -2).trim();
-          }
-          let extractedTemp = matched.temperature || getHistoryVal(/Temp:\s*([^\n,]+)/i, '36.6');
-          if (extractedTemp && extractedTemp.endsWith('°C')) {
-            extractedTemp = extractedTemp.slice(0, -2).trim();
-          }
 
           setFormData({
             ...formData,
@@ -334,9 +342,6 @@ Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContact
             bloodGroup: matched.bloodGroup || 'O+',
             medicalHistory: matched.medicalHistory || '',
             reasonForVisit: extractedReason,
-            bloodPressure: extractedBP,
-            weight: extractedWeight,
-            temperature: extractedTemp,
           });
           return;
         }
@@ -848,6 +853,7 @@ Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContact
                             onChange={(e) => setFormData({ ...formData, doctorId: e.target.value })}
                             className="w-full bg-[#eff4ff] border border-[#c4c6d2] rounded-lg px-4 py-3 appearance-none focus:ring-2 focus:ring-[#001a48]/20 outline-none text-body-md cursor-pointer font-bold text-slate-800"
                           >
+                            <option value="">-- Pending Assignment --</option>
                             {activeDoctorsInRegistration.length > 0 ? (
                               activeDoctorsInRegistration.map((doc) => {
                                 const isDocOnDuty = doc.dutyStatus === 'ON DUTY' || doc.dutyStatus === 'ON_DUTY';
@@ -962,43 +968,6 @@ Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContact
                       />
                     </div>
 
-                    {/* Initial Vitals (Optional) */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-6">
-                        <span className="material-symbols-outlined text-[#001a48]">monitoring</span>
-                        <h3 className="text-title-sm font-bold text-[#0b1c30]">Initial Vitals <span className="text-slate-500 font-normal">(Optional)</span></h3>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-                        <div>
-                          <label className="block text-label-caps text-on-surface-variant mb-2">BLOOD PRESSURE (mmHg)</label>
-                          <input
-                            value={formData.bloodPressure}
-                            onChange={(e) => setFormData({ ...formData, bloodPressure: e.target.value })}
-                            className="w-full bg-[#eff4ff] border border-[#c4c6d2] rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-[#001a48]/20 outline-none text-body-md font-semibold text-slate-800"
-                            type="text"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-label-caps text-on-surface-variant mb-2">WEIGHT (kg)</label>
-                          <input
-                            value={formData.weight}
-                            onChange={(e) => setFormData({ ...formData, weight: e.target.value })}
-                            className="w-full bg-[#eff4ff] border border-[#c4c6d2] rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-[#001a48]/20 outline-none text-body-md font-semibold text-slate-800"
-                            type="text"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-label-caps text-on-surface-variant mb-2">TEMPERATURE (°C)</label>
-                          <input
-                            value={formData.temperature}
-                            onChange={(e) => setFormData({ ...formData, temperature: e.target.value })}
-                            className="w-full bg-[#eff4ff] border border-[#c4c6d2] rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-[#001a48]/20 outline-none text-body-md font-semibold text-slate-800"
-                            type="text"
-                          />
-                        </div>
-                      </div>
-                    </div>
-
                     {/* Step 2 Action Footer */}
                     <div className="px-8 py-6 bg-[#eff4ff] border-t border-[#c4c6d2] -mx-8 -mb-8 flex justify-between">
                       <button
@@ -1012,10 +981,7 @@ Emergency Contact: ${formData.emergencyContactName} (${formData.emergencyContact
                       
                       <button
                         type="submit"
-                        disabled={activeDoctorsInRegistration.length === 0 || !isAnyDoctorOnDuty}
-                        className={`flex items-center gap-2 px-8 py-2.5 bg-[#001a48] text-white font-bold rounded-lg hover:opacity-90 shadow-md transition-all text-body-sm ${
-                          (activeDoctorsInRegistration.length === 0 || !isAnyDoctorOnDuty) ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer animate-pulse'
-                        }`}
+                        className="flex items-center gap-2 px-8 py-2.5 bg-[#001a48] text-white font-bold rounded-lg hover:opacity-90 shadow-md transition-all text-body-sm cursor-pointer animate-pulse"
                       >
                         <span>Complete Registration</span>
                         <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>

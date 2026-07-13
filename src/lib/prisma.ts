@@ -83,7 +83,7 @@ export async function withDbRetry<T>(fn: () => Promise<T>, retries = 4, delayMs 
         errCode === 'P1001' ||
         errCode === 'P1002' ||
         errCode === 'P1017' ||
-        errCode === 'P2025';
+        errCode === 'P2034';
         
       if (isTransient && attempt < retries) {
         console.warn(`[DATABASE RETRY] Transient database deviation on attempt ${attempt}/${retries}: ${err.message || err}. Reconnecting in ${delayMs}ms...`);

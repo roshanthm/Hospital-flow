@@ -5,7 +5,7 @@
 
 import React from 'react';
 import { Navigate, Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import { useStore } from '@/src/store/useStore';
+import { useStore, authFetch } from '@/src/store/useStore';
 import { 
   Hospital, LayoutDashboard, Users, UserRound, 
   Search, Calendar, ShoppingBag, LogOut, 
@@ -54,6 +54,62 @@ export function AppLayout() {
   const [searchQuery, setSearchQuery] = React.useState('');
   const [searchResults, setSearchResults] = React.useState<any[]>([]);
   const [showSearchModal, setShowSearchModal] = React.useState(false);
+
+  // Admin Self Password Change isolated states
+  const [isChangingPassword, setIsChangingPassword] = React.useState(false);
+  const [currentPassword, setCurrentPassword] = React.useState('');
+  const [newPassword, setNewPassword] = React.useState('');
+  const [confirmPassword, setConfirmPassword] = React.useState('');
+  const [isSavingPassword, setIsSavingPassword] = React.useState(false);
+
+  const resetPasswordForm = () => {
+    setIsChangingPassword(false);
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setIsSavingPassword(false);
+  };
+
+  const handleSavePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      toast.error('All fields are required.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      toast.error('New password and password confirmation do not match.');
+      return;
+    }
+    if (newPassword.length < 6) {
+      toast.error('New password must be at least 6 characters in length.');
+      return;
+    }
+
+    setIsSavingPassword(true);
+    try {
+      const res = await authFetch('/api/admin/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+
+      if (res.ok) {
+        toast.success('Your password has been changed successfully.');
+        resetPasswordForm();
+        setShowProfile(false);
+      } else {
+        const data = await res.json();
+        toast.error(data.error || 'Failed to change your password.');
+      }
+    } catch (err) {
+      console.error('Password change error:', err);
+      toast.error('An error occurred. Please try again.');
+    } finally {
+      setIsSavingPassword(false);
+    }
+  };
 
   React.useEffect(() => {
     if (currentUser?.role === 'ADMIN' && (!users || users.length === 0)) {
@@ -261,45 +317,106 @@ export function AppLayout() {
 
         {/* PROFILE MODAL */}
         {showProfile && (
-          <div className="overlay" style={{ display: 'flex' }} onClick={() => setShowProfile(false)}>
+          <div className="overlay" style={{ display: 'flex' }} onClick={() => { setShowProfile(false); resetPasswordForm(); }}>
             <div className="modal-box" style={{ maxWidth: '360px' }} onClick={(e) => e.stopPropagation()}>
-              <div className="modal-hdr">
-                <h3>My Profile</h3>
-                <button className="cls-btn" onClick={() => setShowProfile(false)}><X size={14} /></button>
-              </div>
-              <div className="modal-bdy">
-                <div className="flex items-center gap-4 mb-4">
-                  <div className="medflow-avatar w-[52px] h-[52px] text-lg rounded-xl flex items-center justify-center font-bold">
-                    {initials}
+              {isChangingPassword ? (
+                <>
+                  <div className="modal-hdr">
+                    <h3>Change Password</h3>
+                    <button className="cls-btn" onClick={() => { setShowProfile(false); resetPasswordForm(); }}><X size={14} /></button>
                   </div>
-                  <div>
-                    <div className="text-lg font-bold text-[#003178]">{currentUser?.name}</div>
-                    <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-xs font-bold inline-block mt-1">SUPER ADMIN</span>
+                  <form onSubmit={handleSavePassword}>
+                    <div className="modal-bdy flex flex-col gap-3">
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Current Password</label>
+                        <input
+                          type="password"
+                          className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-indigo-500"
+                          placeholder="••••••••"
+                          value={currentPassword}
+                          onChange={(e) => setCurrentPassword(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">New Password</label>
+                        <input
+                          type="password"
+                          className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-indigo-500"
+                          placeholder="••••••••"
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Confirm New Password</label>
+                        <input
+                          type="password"
+                          className="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-indigo-500"
+                          placeholder="••••••••"
+                          value={confirmPassword}
+                          onChange={(e) => setConfirmPassword(e.target.value)}
+                          required
+                        />
+                      </div>
+                    </div>
+                    <div className="modal-ftr">
+                      <button type="button" className="medflow-btn medflow-btn-ghost medflow-btn-sm" onClick={() => resetPasswordForm()}>Back</button>
+                      <button type="submit" disabled={isSavingPassword} className="medflow-btn medflow-btn-primary bg-indigo-600 hover:bg-indigo-700 text-white medflow-btn-sm">
+                        {isSavingPassword ? 'Saving...' : 'Save Password'}
+                      </button>
+                    </div>
+                  </form>
+                </>
+              ) : (
+                <>
+                  <div className="modal-hdr">
+                    <h3>My Profile</h3>
+                    <button className="cls-btn" onClick={() => setShowProfile(false)}><X size={14} /></button>
                   </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div>
-                    <div className="text-[10px] font-bold uppercase text-slate-400">Role</div>
-                    <div className="font-semibold text-slate-700">Super Admin</div>
+                  <div className="modal-bdy">
+                    <div className="flex items-center gap-4 mb-4">
+                      <div className="medflow-avatar w-[52px] h-[52px] text-lg rounded-xl flex items-center justify-center font-bold">
+                        {initials}
+                      </div>
+                      <div>
+                        <div className="text-lg font-bold text-[#003178]">{currentUser?.name}</div>
+                        <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-xs font-bold inline-block mt-1">SUPER ADMIN</span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div>
+                        <div className="text-[10px] font-bold uppercase text-slate-400">Role</div>
+                        <div className="font-semibold text-slate-700">Super Admin</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold uppercase text-slate-400">Employee ID</div>
+                        <div className="font-semibold text-slate-700">ADM-001</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold uppercase text-slate-400">Department</div>
+                        <div className="font-semibold text-slate-700">Administration</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-bold uppercase text-slate-400">Access Level</div>
+                        <div className="font-semibold text-slate-700">Full System</div>
+                      </div>
+                    </div>
+
+                    <button 
+                      className="medflow-btn medflow-btn-ghost text-indigo-600 hover:text-indigo-700 medflow-btn-sm font-bold flex items-center gap-1.5 w-full justify-center mt-5 border border-indigo-200 hover:bg-indigo-50/50" 
+                      onClick={() => setIsChangingPassword(true)}
+                    >
+                      Change Password
+                    </button>
                   </div>
-                  <div>
-                    <div className="text-[10px] font-bold uppercase text-slate-400">Employee ID</div>
-                    <div className="font-semibold text-slate-700">ADM-001</div>
+                  <div className="modal-ftr">
+                    <button className="medflow-btn medflow-btn-ghost medflow-btn-sm" onClick={() => setShowProfile(false)}>Close</button>
+                    <button className="medflow-btn medflow-btn-primary bg-red-600 hover:bg-red-700 medflow-btn-sm text-white" onClick={handleLogout}>Logout</button>
                   </div>
-                  <div>
-                    <div className="text-[10px] font-bold uppercase text-slate-400">Department</div>
-                    <div className="font-semibold text-slate-700">Administration</div>
-                  </div>
-                  <div>
-                    <div className="text-[10px] font-bold uppercase text-slate-400">Access Level</div>
-                    <div className="font-semibold text-slate-700">Full System</div>
-                  </div>
-                </div>
-              </div>
-              <div className="modal-ftr">
-                <button className="medflow-btn medflow-btn-ghost medflow-btn-sm" onClick={() => setShowProfile(false)}>Close</button>
-                <button className="medflow-btn medflow-btn-primary bg-red-600 hover:bg-red-700 medflow-btn-sm text-white" onClick={handleLogout}>Logout</button>
-              </div>
+                </>
+              )}
             </div>
           </div>
         )}

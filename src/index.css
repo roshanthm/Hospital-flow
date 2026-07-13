@@ -153,7 +153,8 @@
 .medflow-shell {
   display: grid;
   grid-template-columns: 185px 1fr;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 .medflow-sidebar {
   background: #fff;
@@ -242,7 +243,8 @@
 .medflow-main-area {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 .medflow-topbar {
   height: 56px;
